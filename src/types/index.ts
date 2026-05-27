@@ -13,6 +13,9 @@ export interface DetectionSettings {
   aiLogoCornerMarginRatio: number;
   aiLogoCornerWidthRatio: number;
   aiLogoCornerHeightRatio: number;
+  subtitleMatchEnabled: boolean;
+  novelText?: string;
+  subtitleExactMatchIncludePunctuation: boolean;
 }
 
 export interface VideoFile {

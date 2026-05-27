@@ -38,6 +38,9 @@ pub struct DetectionSettings {
     pub ai_logo_corner_margin_ratio: f64,
     pub ai_logo_corner_width_ratio: f64,
     pub ai_logo_corner_height_ratio: f64,
+    pub subtitle_match_enabled: bool,
+    pub novel_text: Option<String>,
+    pub subtitle_exact_match_include_punctuation: bool,
 }
 
 impl Default for DetectionSettings {
@@ -51,6 +54,9 @@ impl Default for DetectionSettings {
             ai_logo_corner_margin_ratio: 0.025,
             ai_logo_corner_width_ratio: 0.25,
             ai_logo_corner_height_ratio: 0.25,
+            subtitle_match_enabled: false,
+            novel_text: None,
+            subtitle_exact_match_include_punctuation: true,
         }
     }
 }

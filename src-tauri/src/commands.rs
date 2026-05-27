@@ -222,6 +222,12 @@ fn build_detection_result(
         problems.push(problem);
     }
 
+    for (index, segment) in detect_subtitle_mismatch(file_path, duration, mode, settings)?.iter().enumerate() {
+        let mut problem = build_subtitle_mismatch_problem(index, segment);
+        attach_problem_screenshots(&mut problem, file_path, duration, probe.fps);
+        problems.push(problem);
+    }
+
     Ok(result_from_parts(
         problems,
         BasicVideoInfo {
@@ -321,6 +327,21 @@ struct RgbFrame {
     height: usize,
     timestamp: f64,
     data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct OcrFrameText {
+    timestamp: f64,
+    text: String,
+    confidence: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct SubtitleSegment {
+    start_time: f64,
+    end_time: f64,
+    text: String,
+    confidence: f64,
 }
 
 fn probe_video(file_path: &str) -> Result<VideoProbe, String> {
@@ -702,6 +723,293 @@ fn build_ai_logo_problem(index: usize, hit: &AiLogoHit) -> Problem {
         start_screenshot: None,
         end_screenshot: None,
     }
+}
+
+fn detect_subtitle_mismatch(
+    file_path: &str,
+    duration: f64,
+    mode: &DetectionMode,
+    settings: &DetectionSettings,
+) -> Result<Vec<SubtitleSegment>, String> {
+    if !settings.subtitle_match_enabled {
+        return Ok(Vec::new());
+    }
+
+    let novel_text = settings
+        .novel_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "已启用字幕文本匹配，但小说文本为空。请粘贴小说原文后再检测。".to_string())?;
+
+    let tesseract = find_tesseract_binary()
+        .ok_or_else(|| "已启用字幕文本匹配，但未找到 tesseract OCR。请安装 tesseract 或配置 sidecar。".to_string())?;
+    let sample_times = subtitle_sample_times(duration, mode);
+    let mut frames = Vec::new();
+
+    for timestamp in sample_times {
+        if let Some(image) = capture_subtitle_region_png(file_path, timestamp)? {
+            let text = run_tesseract_ocr(&tesseract, &image)?;
+            if !text.text.trim().is_empty() {
+                frames.push(OcrFrameText {
+                    timestamp,
+                    text: text.text,
+                    confidence: text.confidence,
+                });
+            }
+        }
+    }
+
+    let segments = merge_ocr_frames(&frames);
+    Ok(find_unmatched_subtitle_segments(
+        &segments,
+        novel_text,
+        settings.subtitle_exact_match_include_punctuation,
+    ))
+}
+
+fn subtitle_sample_times(duration: f64, mode: &DetectionMode) -> Vec<f64> {
+    if duration <= 0.5 {
+        return Vec::new();
+    }
+
+    let interval = match mode {
+        DetectionMode::Fast => 4.0,
+        DetectionMode::Balanced => 2.0,
+        DetectionMode::Accurate => 1.0,
+    };
+    let mut times = Vec::new();
+    let mut current = 0.5;
+    let end = (duration - 0.2).max(0.5);
+    while current <= end {
+        times.push(current);
+        current += interval;
+    }
+    times
+}
+
+fn find_unmatched_subtitle_segments(
+    segments: &[SubtitleSegment],
+    novel_text: &str,
+    include_punctuation: bool,
+) -> Vec<SubtitleSegment> {
+    let normalized_novel = normalize_match_text(novel_text, include_punctuation);
+    if normalized_novel.is_empty() {
+        return segments.to_vec();
+    }
+
+    segments
+        .iter()
+        .filter(|segment| {
+            let normalized_subtitle = normalize_match_text(&segment.text, include_punctuation);
+            !normalized_subtitle.is_empty() && !normalized_novel.contains(&normalized_subtitle)
+        })
+        .cloned()
+        .collect()
+}
+
+fn normalize_match_text(input: &str, include_punctuation: bool) -> String {
+    input
+        .chars()
+        .filter_map(|char| normalize_match_char(char, include_punctuation))
+        .collect()
+}
+
+fn normalize_match_char(char: char, include_punctuation: bool) -> Option<char> {
+    if char.is_control() || char.is_whitespace() {
+        return None;
+    }
+
+    let normalized = match char {
+        '，' => ',',
+        '。' => '.',
+        '！' => '!',
+        '？' => '?',
+        '：' => ':',
+        '；' => ';',
+        '“' | '”' => '"',
+        '‘' | '’' => '\'',
+        '（' => '(',
+        '）' => ')',
+        '【' => '[',
+        '】' => ']',
+        '、' => ',',
+        value if ('！'..='～').contains(&value) => {
+            char::from_u32(value as u32 - 0xFEE0).unwrap_or(value)
+        }
+        value => value,
+    };
+
+    if include_punctuation || normalized.is_alphanumeric() || is_cjk(normalized) {
+        Some(normalized.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
+fn is_cjk(char: char) -> bool {
+    matches!(char as u32, 0x4E00..=0x9FFF | 0x3400..=0x4DBF)
+}
+
+fn merge_ocr_frames(frames: &[OcrFrameText]) -> Vec<SubtitleSegment> {
+    let mut segments: Vec<SubtitleSegment> = Vec::new();
+
+    for frame in frames {
+        let normalized = normalize_match_text(&frame.text, true);
+        if normalized.is_empty() {
+            continue;
+        }
+
+        if let Some(last) = segments.last_mut() {
+            if normalize_match_text(&last.text, true) == normalized {
+                last.end_time = frame.timestamp;
+                last.confidence = last.confidence.min(frame.confidence);
+                continue;
+            }
+        }
+
+        segments.push(SubtitleSegment {
+            start_time: frame.timestamp,
+            end_time: frame.timestamp,
+            text: frame.text.trim().to_string(),
+            confidence: frame.confidence,
+        });
+    }
+
+    segments
+}
+
+fn build_subtitle_mismatch_problem(index: usize, segment: &SubtitleSegment) -> Problem {
+    Problem {
+        id: format!("subtitle-match-real-{index}"),
+        r#type: "字幕与小说不匹配".to_string(),
+        level: RiskLevel::Red,
+        start_time: segment.start_time,
+        end_time: segment.end_time.max(segment.start_time),
+        description: format!(
+            "OCR字幕未能在小说文本中逐字连续匹配（含标点）。字幕：\"{}\"；OCR置信度 {:.1}%。OCR识别结果可能有误，请人工复核。",
+            segment.text,
+            segment.confidence
+        ),
+        screenshot: None,
+        start_screenshot: None,
+        end_screenshot: None,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct OcrText {
+    text: String,
+    confidence: f64,
+}
+
+fn capture_subtitle_region_png(file_path: &str, timestamp: f64) -> Result<Option<Vec<u8>>, String> {
+    let ffmpeg = find_ffmpeg_binary()
+        .ok_or_else(|| "未找到 ffmpeg，无法执行字幕 OCR 抽帧。请安装 ffmpeg 或配置 sidecar。".to_string())?;
+    let output = Command::new(ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            &format!("{:.3}", timestamp.max(0.0)),
+            "-i",
+            file_path,
+            "-frames:v",
+            "1",
+            "-vf",
+            "crop=iw:ih*0.35:0:ih*0.65,scale=960:-2,format=gray",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "png",
+            "pipe:1",
+        ])
+        .output()
+        .map_err(|error| format!("执行 FFmpeg 字幕 OCR 抽帧失败：{error}"))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "FFmpeg 字幕 OCR 抽帧失败：{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    Ok((!output.stdout.is_empty()).then_some(output.stdout))
+}
+
+fn run_tesseract_ocr(tesseract: &Path, image: &[u8]) -> Result<OcrText, String> {
+    let input_path = std::env::temp_dir().join(format!("video_inspector_ocr_{}.png", unique_suffix()));
+    let output_base = std::env::temp_dir().join(format!("video_inspector_ocr_{}", unique_suffix()));
+    fs::write(&input_path, image).map_err(|error| format!("写入 OCR 临时图像失败：{error}"))?;
+
+    let output = Command::new(tesseract)
+        .arg(&input_path)
+        .arg(&output_base)
+        .args(["-l", "chi_sim+eng", "--psm", "6", "tsv"])
+        .output()
+        .map_err(|error| format!("执行 tesseract OCR 失败：{error}"));
+
+    let _ = fs::remove_file(&input_path);
+    let output = output?;
+    if !output.status.success() {
+        let _ = fs::remove_file(output_base.with_extension("tsv"));
+        return Err(format!(
+            "tesseract OCR 失败：{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let tsv_path = output_base.with_extension("tsv");
+    let tsv = fs::read_to_string(&tsv_path).map_err(|error| format!("读取 OCR TSV 失败：{error}"))?;
+    let _ = fs::remove_file(&tsv_path);
+    Ok(parse_tesseract_tsv(&tsv))
+}
+
+fn parse_tesseract_tsv(tsv: &str) -> OcrText {
+    let mut text_parts = Vec::new();
+    let mut confidences = Vec::new();
+
+    for line in tsv.lines().skip(1) {
+        let columns = line.split('\t').collect::<Vec<_>>();
+        if columns.len() < 12 {
+            continue;
+        }
+        let text = columns[11].trim();
+        if text.is_empty() {
+            continue;
+        }
+        text_parts.push(text.to_string());
+        if let Ok(confidence) = columns[10].parse::<f64>() {
+            if confidence >= 0.0 {
+                confidences.push(confidence);
+            }
+        }
+    }
+
+    let confidence = if confidences.is_empty() {
+        0.0
+    } else {
+        confidences.iter().sum::<f64>() / confidences.len() as f64
+    };
+
+    OcrText {
+        text: text_parts.join(""),
+        confidence,
+    }
+}
+
+fn unique_suffix() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("{}_{}", std::process::id(), nanos)
+}
+
+fn find_tesseract_binary() -> Option<PathBuf> {
+    find_binary("tesseract")
 }
 
 fn capture_rgb_frame(
@@ -1317,6 +1625,135 @@ mod tests {
 
         assert!(matches!(problem.level, RiskLevel::Red));
         assert_eq!(problem.r#type, "疑似 AI 标识");
+    }
+
+    #[test]
+    fn subtitle_text_normalization_preserves_punctuation() {
+        let normalized = normalize_match_text("他说：“你好！”", true);
+
+        assert_eq!(normalized, "他说:\"你好!\"");
+    }
+
+    #[test]
+    fn subtitle_exact_match_accepts_continuous_novel_text() {
+        let segments = vec![SubtitleSegment {
+            start_time: 1.0,
+            end_time: 2.0,
+            text: "他说:\"你好!\"".to_string(),
+            confidence: 92.0,
+        }];
+
+        let unmatched = find_unmatched_subtitle_segments(&segments, "前文他说：“你好！”后文", true);
+
+        assert!(unmatched.is_empty());
+    }
+
+    #[test]
+    fn subtitle_exact_match_reports_changed_punctuation() {
+        let segments = vec![SubtitleSegment {
+            start_time: 1.0,
+            end_time: 2.0,
+            text: "他说:\"你好?\"".to_string(),
+            confidence: 92.0,
+        }];
+
+        let unmatched = find_unmatched_subtitle_segments(&segments, "他说：“你好！”", true);
+
+        assert_eq!(unmatched.len(), 1);
+    }
+
+    #[test]
+    fn repeated_ocr_frames_merge_into_one_subtitle_segment() {
+        let frames = vec![
+            OcrFrameText {
+                timestamp: 1.0,
+                text: "你好！".to_string(),
+                confidence: 91.0,
+            },
+            OcrFrameText {
+                timestamp: 3.0,
+                text: "你好!".to_string(),
+                confidence: 88.0,
+            },
+        ];
+
+        let segments = merge_ocr_frames(&frames);
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].start_time, 1.0);
+        assert_eq!(segments[0].end_time, 3.0);
+        assert_eq!(segments[0].confidence, 88.0);
+    }
+
+    #[test]
+    fn subtitle_match_disabled_does_not_require_novel_text_or_ocr() {
+        let result = detect_subtitle_mismatch(
+            "/path/not/used.mp4",
+            10.0,
+            &DetectionMode::Balanced,
+            &DetectionSettings::default(),
+        )
+        .unwrap();
+
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn subtitle_match_enabled_requires_novel_text() {
+        let settings = DetectionSettings {
+            subtitle_match_enabled: true,
+            novel_text: Some("   ".to_string()),
+            ..DetectionSettings::default()
+        };
+
+        let error = detect_subtitle_mismatch(
+            "/path/not/used.mp4",
+            10.0,
+            &DetectionMode::Balanced,
+            &settings,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("小说文本为空"));
+    }
+
+    #[test]
+    fn subtitle_match_enabled_reports_missing_ocr_engine() {
+        let settings = DetectionSettings {
+            subtitle_match_enabled: true,
+            novel_text: Some("他说：“你好！”".to_string()),
+            ..DetectionSettings::default()
+        };
+
+        if find_tesseract_binary().is_some() {
+            return;
+        }
+
+        let error = detect_subtitle_mismatch(
+            "/path/not/used.mp4",
+            10.0,
+            &DetectionMode::Balanced,
+            &settings,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("未找到 tesseract OCR"));
+    }
+
+    #[test]
+    fn subtitle_mismatch_problem_is_red_line() {
+        let segment = SubtitleSegment {
+            start_time: 1.0,
+            end_time: 2.0,
+            text: "错字字幕".to_string(),
+            confidence: 77.0,
+        };
+
+        let problem = build_subtitle_mismatch_problem(0, &segment);
+
+        assert!(matches!(problem.level, RiskLevel::Red));
+        assert_eq!(problem.r#type, "字幕与小说不匹配");
+        assert!(problem.description.contains("OCR识别结果可能有误"));
     }
 
     #[test]

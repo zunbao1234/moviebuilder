@@ -6,6 +6,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import FileList from "./components/FileList";
 import ResultPanel from "./components/ResultPanel";
 import StatusBar from "./components/StatusBar";
+import SubtitleMatchSettings from "./components/SubtitleMatchSettings";
 import Toolbar from "./components/Toolbar";
 import { isTauriRuntime } from "./tauriRuntime";
 import type {
@@ -32,6 +33,9 @@ export default function App() {
     aiLogoCornerMarginRatio: 0.025,
     aiLogoCornerWidthRatio: 0.25,
     aiLogoCornerHeightRatio: 0.25,
+    subtitleMatchEnabled: false,
+    novelText: "",
+    subtitleExactMatchIncludePunctuation: true,
   });
   const [activeStage, setActiveStage] = useState("空闲");
   const [dragActive, setDragActive] = useState(false);
@@ -304,6 +308,11 @@ export default function App() {
           activeStage={activeStage}
           onSelectFile={(file) => setSelectedPath(file.path)}
           onDeleteFile={handleDeleteFile}
+        />
+        <SubtitleMatchSettings
+          settings={settings}
+          onSettingsChange={setSettings}
+          disabled={isDetecting}
         />
         <ResultPanel file={selectedFile} />
       </main>
