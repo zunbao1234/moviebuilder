@@ -62,7 +62,14 @@ pub async fn start_detection(
             continue;
         }
 
-        run_detection(&app, &state, &file_path, &mode, settings.clone().unwrap_or_default()).await?;
+        run_detection(
+            &app,
+            &state,
+            &file_path,
+            &mode,
+            settings.clone().unwrap_or_default(),
+        )
+        .await?;
     }
 
     Ok(())
@@ -205,7 +212,9 @@ fn build_detection_result(
     if let (Some(source_width), Some(source_height)) = (probe.width, probe.height) {
         let cropdetect_problem = detect_black_borders(file_path, mode)?
             .filter(|crop| crop_has_visible_border(source_width, source_height, crop))
-            .and_then(|crop| build_black_border_problem(source_width, source_height, &crop, duration, settings));
+            .and_then(|crop| {
+                build_black_border_problem(source_width, source_height, &crop, duration, settings)
+            });
 
         if let Some(mut problem) = cropdetect_problem {
             attach_problem_screenshots(&mut problem, file_path, duration, probe.fps);
@@ -226,20 +235,25 @@ fn build_detection_result(
         }
     }
 
-    for (index, segment) in detect_frozen_frames(file_path, mode)?.iter().enumerate() {
-        if let Some(mut problem) = build_frozen_frame_problem(index, segment) {
-            attach_problem_screenshots(&mut problem, file_path, duration, probe.fps);
-            problems.push(problem);
-        }
+    let freeze_segments = detect_frozen_frames(file_path, mode, probe.fps)?;
+    if let Some(mut problem) = build_frozen_frame_summary_problem(&freeze_segments, probe.fps) {
+        attach_problem_screenshots(&mut problem, file_path, duration, probe.fps);
+        problems.push(problem);
     }
 
-    for (index, hit) in detect_ai_logo_marks(file_path, duration, settings)?.iter().enumerate() {
+    for (index, hit) in detect_ai_logo_marks(file_path, duration, settings)?
+        .iter()
+        .enumerate()
+    {
         let mut problem = build_ai_logo_problem(index, hit);
         attach_problem_screenshots(&mut problem, file_path, duration, probe.fps);
         problems.push(problem);
     }
 
-    for (index, segment) in detect_subtitle_mismatch(file_path, duration, mode, settings)?.iter().enumerate() {
+    for (index, segment) in detect_subtitle_mismatch(file_path, duration, mode, settings)?
+        .iter()
+        .enumerate()
+    {
         let mut problem = build_subtitle_mismatch_problem(index, segment);
         attach_problem_screenshots(&mut problem, file_path, duration, probe.fps);
         problems.push(problem);
@@ -249,9 +263,7 @@ fn build_detection_result(
         problems,
         BasicVideoInfo {
             duration,
-            resolution: probe
-                .resolution()
-                .unwrap_or_else(|| "未知".to_string()),
+            resolution: probe.resolution().unwrap_or_else(|| "未知".to_string()),
             fps: probe.fps.unwrap_or(0.0),
             codec: probe.codec.unwrap_or_else(|| "未知".to_string()),
             file_size,
@@ -371,7 +383,9 @@ struct SubtitleSegment {
 
 fn probe_video(file_path: &str) -> Result<VideoProbe, String> {
     find_ffprobe_binary()
-        .ok_or_else(|| "未找到 ffprobe，无法读取真实视频基础信息。请安装 ffprobe 或配置 sidecar。".to_string())
+        .ok_or_else(|| {
+            "未找到 ffprobe，无法读取真实视频基础信息。请安装 ffprobe 或配置 sidecar。".to_string()
+        })
         .and_then(|ffprobe| probe_video_with_ffprobe(&ffprobe, file_path))
 }
 
@@ -398,8 +412,8 @@ fn probe_video_with_ffprobe(ffprobe: &Path, file_path: &str) -> Result<VideoProb
         ));
     }
 
-    let json: Value =
-        serde_json::from_slice(&output.stdout).map_err(|error| format!("解析 ffprobe JSON 失败：{error}"))?;
+    let json: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("解析 ffprobe JSON 失败：{error}"))?;
     let stream = json
         .get("streams")
         .and_then(Value::as_array)
@@ -432,9 +446,13 @@ fn probe_video_with_ffprobe(ffprobe: &Path, file_path: &str) -> Result<VideoProb
     })
 }
 
-fn detect_black_borders(file_path: &str, mode: &DetectionMode) -> Result<Option<CropSuggestion>, String> {
-    let ffmpeg = find_ffmpeg_binary()
-        .ok_or_else(|| "未找到 ffmpeg，无法执行黑边检测。请安装 ffmpeg 或配置 sidecar。".to_string())?;
+fn detect_black_borders(
+    file_path: &str,
+    mode: &DetectionMode,
+) -> Result<Option<CropSuggestion>, String> {
+    let ffmpeg = find_ffmpeg_binary().ok_or_else(|| {
+        "未找到 ffmpeg，无法执行黑边检测。请安装 ffmpeg 或配置 sidecar。".to_string()
+    })?;
     let sample_seconds = match mode {
         DetectionMode::Fast => "8",
         DetectionMode::Balanced => "15",
@@ -496,7 +514,9 @@ fn detect_edge_black_borders(
     let mut best_score = 0_u32;
 
     for timestamp in sample_times {
-        if let Some(frame) = capture_rgb_frame_without_padding(file_path, timestamp, frame_width, frame_height)? {
+        if let Some(frame) =
+            capture_rgb_frame_without_padding(file_path, timestamp, frame_width, frame_height)?
+        {
             if let Some(crop) = crop_from_edge_black_borders(&frame) {
                 let border_score = crop.x
                     + crop.y
@@ -568,7 +588,13 @@ fn crop_from_edge_black_borders(frame: &RgbFrame) -> Option<CropSuggestion> {
         right: scan_black_columns_from_right(frame),
     };
     let min_pixels = ((frame.width.min(frame.height) as f64) * 0.015).ceil() as usize;
-    if borders.top.max(borders.bottom).max(borders.left).max(borders.right) < min_pixels.max(2) {
+    if borders
+        .top
+        .max(borders.bottom)
+        .max(borders.left)
+        .max(borders.right)
+        < min_pixels.max(2)
+    {
         return None;
     }
 
@@ -676,10 +702,10 @@ fn build_black_border_problem(
         return None;
     }
 
-    let irregular =
-        (left.abs_diff(right) as f64 / source_width as f64) >= settings.black_border_irregular_threshold
-            || (top.abs_diff(bottom) as f64 / source_height as f64)
-                >= settings.black_border_irregular_threshold;
+    let irregular = (left.abs_diff(right) as f64 / source_width as f64)
+        >= settings.black_border_irregular_threshold
+        || (top.abs_diff(bottom) as f64 / source_height as f64)
+            >= settings.black_border_irregular_threshold;
     let level = if max_ratio >= settings.black_border_red_threshold
         || (irregular && max_ratio >= settings.black_border_yellow_threshold)
     {
@@ -721,21 +747,22 @@ fn build_black_border_problem(
     })
 }
 
-fn detect_frozen_frames(file_path: &str, mode: &DetectionMode) -> Result<Vec<FreezeSegment>, String> {
-    let ffmpeg = find_ffmpeg_binary()
-        .ok_or_else(|| "未找到 ffmpeg，无法执行冻结帧检测。请安装 ffmpeg 或配置 sidecar。".to_string())?;
-    let threshold = match mode {
-        DetectionMode::Fast => "3",
-        DetectionMode::Balanced => "2",
-        DetectionMode::Accurate => "1",
-    };
+fn detect_frozen_frames(
+    file_path: &str,
+    mode: &DetectionMode,
+    fps: Option<f64>,
+) -> Result<Vec<FreezeSegment>, String> {
+    let ffmpeg = find_ffmpeg_binary().ok_or_else(|| {
+        "未找到 ffmpeg，无法执行冻结帧检测。请安装 ffmpeg 或配置 sidecar。".to_string()
+    })?;
+    let threshold = freezedetect_duration_threshold(mode, fps);
     let output = Command::new(ffmpeg)
         .args([
             "-hide_banner",
             "-i",
             file_path,
             "-vf",
-            &format!("freezedetect=n=0.003:d={threshold}"),
+            &format!("freezedetect=n=0.003:d={threshold:.6}"),
             "-an",
             "-f",
             "null",
@@ -751,41 +778,138 @@ fn detect_frozen_frames(file_path: &str, mode: &DetectionMode) -> Result<Vec<Fre
         ));
     }
 
-    Ok(parse_freeze_segments(&String::from_utf8_lossy(&output.stderr)))
+    Ok(parse_freeze_segments(&String::from_utf8_lossy(
+        &output.stderr,
+    )))
 }
 
+#[cfg(test)]
 fn build_frozen_frame_problem(index: usize, segment: &FreezeSegment) -> Option<Problem> {
-    if segment.duration < 1.0 || segment.end <= segment.start {
+    build_frozen_frame_problem_with_fps(index, segment, Some(DEFAULT_FPS))
+}
+
+#[cfg(test)]
+fn build_frozen_frame_problem_with_fps(
+    index: usize,
+    segment: &FreezeSegment,
+    fps: Option<f64>,
+) -> Option<Problem> {
+    if segment.duration <= 0.0 || segment.end <= segment.start {
         return None;
     }
 
-    let level = if segment.duration >= 5.0 {
-        RiskLevel::Red
-    } else if segment.duration >= 2.0 {
-        RiskLevel::Yellow
-    } else {
-        RiskLevel::Green
-    };
-    let risk_text = match level {
-        RiskLevel::Red => "达到红线阈值",
-        RiskLevel::Yellow => "达到黄线阈值",
-        RiskLevel::Green => "低于黄线阈值，仅供参考",
-    };
+    let repeated_frames = repeated_frame_count(segment, fps);
+    let level = risk_level_for_repeated_frames(repeated_frames, repeated_frames);
+    let risk_text = risk_text(&level);
 
     Some(Problem {
         id: format!("freeze-real-{index}"),
-        r#type: "冻结帧".to_string(),
+        r#type: "夹帧/冻结帧".to_string(),
         level,
         start_time: segment.start,
         end_time: segment.end,
         description: format!(
-            "FFmpeg freezedetect 实测：画面冻结 {:.3} 秒，位置 {:.3}s - {:.3}s，{risk_text}。",
+            "FFmpeg freezedetect 实测：疑似重复/冻结约 {repeated_frames} 帧，持续 {:.3} 秒，位置 {:.3}s - {:.3}s，{risk_text}。",
             segment.duration, segment.start, segment.end
         ),
         screenshot: None,
         start_screenshot: None,
         end_screenshot: None,
     })
+}
+
+fn build_frozen_frame_summary_problem(
+    segments: &[FreezeSegment],
+    fps: Option<f64>,
+) -> Option<Problem> {
+    let mut valid_segments = segments
+        .iter()
+        .filter(|segment| segment.duration > 0.0 && segment.end > segment.start)
+        .map(|segment| (segment, repeated_frame_count(segment, fps)))
+        .filter(|(_, repeated_frames)| *repeated_frames > 0)
+        .collect::<Vec<_>>();
+
+    if valid_segments.is_empty() {
+        return None;
+    }
+
+    valid_segments.sort_by(|(left, _), (right, _)| left.start.total_cmp(&right.start));
+    let total_repeated_frames = valid_segments
+        .iter()
+        .map(|(_, repeated_frames)| *repeated_frames)
+        .sum::<u32>();
+    let (worst_segment, max_repeated_frames) = valid_segments
+        .iter()
+        .max_by_key(|(_, repeated_frames)| *repeated_frames)
+        .copied()?;
+    let first_start = valid_segments.first()?.0.start;
+    let last_end = valid_segments.last()?.0.end;
+    let level = risk_level_for_repeated_frames(max_repeated_frames, total_repeated_frames);
+    let risk_text = risk_text(&level);
+
+    Some(Problem {
+        id: "freeze-real-summary".to_string(),
+        r#type: "夹帧/冻结帧".to_string(),
+        level,
+        start_time: worst_segment.start,
+        end_time: worst_segment.end,
+        description: format!(
+            "FFmpeg freezedetect 实测：检测到 {} 个疑似夹帧/冻结片段，最大连续约 {} 帧（持续 {:.3} 秒，位置 {:.3}s - {:.3}s），累计约 {} 帧，覆盖范围 {:.3}s - {:.3}s。按 PRD 规则：连续≥5帧或累计≥20帧为红线，2-4帧或累计5-19帧为黄线，1帧为绿线；当前{risk_text}。",
+            valid_segments.len(),
+            max_repeated_frames,
+            worst_segment.duration,
+            worst_segment.start,
+            worst_segment.end,
+            total_repeated_frames,
+            first_start,
+            last_end,
+        ),
+        screenshot: None,
+        start_screenshot: None,
+        end_screenshot: None,
+    })
+}
+
+const DEFAULT_FPS: f64 = 30.0;
+
+fn freezedetect_duration_threshold(mode: &DetectionMode, fps: Option<f64>) -> f64 {
+    let fps = fps
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(DEFAULT_FPS);
+    let min_frames = match mode {
+        DetectionMode::Fast => 5.0,
+        DetectionMode::Balanced => 2.0,
+        DetectionMode::Accurate => 1.0,
+    };
+    min_frames / fps
+}
+
+fn repeated_frame_count(segment: &FreezeSegment, fps: Option<f64>) -> u32 {
+    let fps = fps
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(DEFAULT_FPS);
+    (segment.duration * fps).round().max(1.0) as u32
+}
+
+fn risk_level_for_repeated_frames(
+    max_continuous_frames: u32,
+    total_repeated_frames: u32,
+) -> RiskLevel {
+    if max_continuous_frames >= 5 || total_repeated_frames >= 20 {
+        RiskLevel::Red
+    } else if max_continuous_frames >= 2 || total_repeated_frames >= 5 {
+        RiskLevel::Yellow
+    } else {
+        RiskLevel::Green
+    }
+}
+
+fn risk_text(level: &RiskLevel) -> &'static str {
+    match level {
+        RiskLevel::Red => "达到红线阈值",
+        RiskLevel::Yellow => "达到黄线阈值",
+        RiskLevel::Green => "低于黄线阈值，仅供参考",
+    }
 }
 
 fn detect_ai_logo_marks(
@@ -813,42 +937,54 @@ fn ai_logo_sample_times(duration: f64) -> Vec<f64> {
         return Vec::new();
     }
 
-    let mut times = vec![0.5, duration * 0.33, duration * 0.66, (duration - 0.5).max(0.5)];
-    times.iter_mut().for_each(|time| *time = time.clamp(0.0, duration));
+    let mut times = vec![
+        0.5,
+        duration * 0.33,
+        duration * 0.66,
+        (duration - 0.5).max(0.5),
+    ];
+    times
+        .iter_mut()
+        .for_each(|time| *time = time.clamp(0.0, duration));
     times.sort_by(f64::total_cmp);
     times.dedup_by(|a, b| (*a - *b).abs() < 0.25);
     times
 }
 
 fn analyze_ai_logo_frames(frames: &[RgbFrame], settings: &DetectionSettings) -> Vec<AiLogoHit> {
-    [Corner::TopLeft, Corner::TopRight, Corner::BottomLeft, Corner::BottomRight]
-        .into_iter()
-        .filter_map(|corner| {
-            let mut hits = 0;
-            let mut max_score = 0.0_f64;
-            let mut start_time = None;
-            let mut end_time = None;
+    [
+        Corner::TopLeft,
+        Corner::TopRight,
+        Corner::BottomLeft,
+        Corner::BottomRight,
+    ]
+    .into_iter()
+    .filter_map(|corner| {
+        let mut hits = 0;
+        let mut max_score = 0.0_f64;
+        let mut start_time = None;
+        let mut end_time = None;
 
-            for frame in frames {
-                let score = corner_mark_score(frame, corner, settings);
-                max_score = max_score.max(score);
-                if score >= settings.ai_logo_score_threshold {
-                    hits += 1;
-                    start_time.get_or_insert(frame.timestamp);
-                    end_time = Some(frame.timestamp);
-                }
+        for frame in frames {
+            let score = corner_mark_score(frame, corner, settings);
+            max_score = max_score.max(score);
+            if score >= settings.ai_logo_score_threshold {
+                hits += 1;
+                start_time.get_or_insert(frame.timestamp);
+                end_time = Some(frame.timestamp);
             }
+        }
 
-            (hits >= settings.ai_logo_min_hits).then(|| AiLogoHit {
-                corner,
-                hits,
-                total_samples: frames.len(),
-                max_score,
-                start_time: start_time.unwrap_or(0.0),
-                end_time: end_time.unwrap_or(0.0),
-            })
+        (hits >= settings.ai_logo_min_hits).then(|| AiLogoHit {
+            corner,
+            hits,
+            total_samples: frames.len(),
+            max_score,
+            start_time: start_time.unwrap_or(0.0),
+            end_time: end_time.unwrap_or(0.0),
         })
-        .collect()
+    })
+    .collect()
 }
 
 fn corner_mark_score(frame: &RgbFrame, corner: Corner, settings: &DetectionSettings) -> f64 {
@@ -865,8 +1001,14 @@ fn corner_mark_score(frame: &RgbFrame, corner: Corner, settings: &DetectionSetti
 
     let (x0, y0) = match corner {
         Corner::TopLeft => (margin_x, margin_y),
-        Corner::TopRight => (frame.width.saturating_sub(corner_width + margin_x), margin_y),
-        Corner::BottomLeft => (margin_x, frame.height.saturating_sub(corner_height + margin_y)),
+        Corner::TopRight => (
+            frame.width.saturating_sub(corner_width + margin_x),
+            margin_y,
+        ),
+        Corner::BottomLeft => (
+            margin_x,
+            frame.height.saturating_sub(corner_height + margin_y),
+        ),
         Corner::BottomRight => (
             frame.width.saturating_sub(corner_width + margin_x),
             frame.height.saturating_sub(corner_height + margin_y),
@@ -951,10 +1093,13 @@ fn detect_subtitle_mismatch(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| "已启用字幕文本匹配，但小说文本为空。请粘贴小说原文后再检测。".to_string())?;
+        .ok_or_else(|| {
+            "已启用字幕文本匹配，但小说文本为空。请粘贴小说原文后再检测。".to_string()
+        })?;
 
-    let tesseract = find_tesseract_binary()
-        .ok_or_else(|| "已启用字幕文本匹配，但未找到 tesseract OCR。请安装 tesseract 或配置 sidecar。".to_string())?;
+    let tesseract = find_tesseract_binary().ok_or_else(|| {
+        "已启用字幕文本匹配，但未找到 tesseract OCR。请安装 tesseract 或配置 sidecar。".to_string()
+    })?;
     let sample_times = subtitle_sample_times(duration, mode);
     let mut frames = Vec::new();
 
@@ -1115,8 +1260,9 @@ struct OcrText {
 }
 
 fn capture_subtitle_region_png(file_path: &str, timestamp: f64) -> Result<Option<Vec<u8>>, String> {
-    let ffmpeg = find_ffmpeg_binary()
-        .ok_or_else(|| "未找到 ffmpeg，无法执行字幕 OCR 抽帧。请安装 ffmpeg 或配置 sidecar。".to_string())?;
+    let ffmpeg = find_ffmpeg_binary().ok_or_else(|| {
+        "未找到 ffmpeg，无法执行字幕 OCR 抽帧。请安装 ffmpeg 或配置 sidecar。".to_string()
+    })?;
     let output = Command::new(ffmpeg)
         .args([
             "-hide_banner",
@@ -1150,7 +1296,8 @@ fn capture_subtitle_region_png(file_path: &str, timestamp: f64) -> Result<Option
 }
 
 fn run_tesseract_ocr(tesseract: &Path, image: &[u8]) -> Result<OcrText, String> {
-    let input_path = std::env::temp_dir().join(format!("video_inspector_ocr_{}.png", unique_suffix()));
+    let input_path =
+        std::env::temp_dir().join(format!("video_inspector_ocr_{}.png", unique_suffix()));
     let output_base = std::env::temp_dir().join(format!("video_inspector_ocr_{}", unique_suffix()));
     fs::write(&input_path, image).map_err(|error| format!("写入 OCR 临时图像失败：{error}"))?;
 
@@ -1172,7 +1319,8 @@ fn run_tesseract_ocr(tesseract: &Path, image: &[u8]) -> Result<OcrText, String> 
     }
 
     let tsv_path = output_base.with_extension("tsv");
-    let tsv = fs::read_to_string(&tsv_path).map_err(|error| format!("读取 OCR TSV 失败：{error}"))?;
+    let tsv =
+        fs::read_to_string(&tsv_path).map_err(|error| format!("读取 OCR TSV 失败：{error}"))?;
     let _ = fs::remove_file(&tsv_path);
     Ok(parse_tesseract_tsv(&tsv))
 }
@@ -1229,8 +1377,9 @@ fn capture_rgb_frame(
     width: usize,
     height: usize,
 ) -> Result<Option<RgbFrame>, String> {
-    let ffmpeg = find_ffmpeg_binary()
-        .ok_or_else(|| "未找到 ffmpeg，无法执行 AI 标识检测。请安装 ffmpeg 或配置 sidecar。".to_string())?;
+    let ffmpeg = find_ffmpeg_binary().ok_or_else(|| {
+        "未找到 ffmpeg，无法执行 AI 标识检测。请安装 ffmpeg 或配置 sidecar。".to_string()
+    })?;
     let output = Command::new(ffmpeg)
         .args([
             "-hide_banner",
@@ -1279,8 +1428,9 @@ fn capture_rgb_frame_without_padding(
     width: usize,
     height: usize,
 ) -> Result<Option<RgbFrame>, String> {
-    let ffmpeg = find_ffmpeg_binary()
-        .ok_or_else(|| "未找到 ffmpeg，无法执行黑边兜底抽帧。请安装 ffmpeg 或配置 sidecar。".to_string())?;
+    let ffmpeg = find_ffmpeg_binary().ok_or_else(|| {
+        "未找到 ffmpeg，无法执行黑边兜底抽帧。请安装 ffmpeg 或配置 sidecar。".to_string()
+    })?;
     let output = Command::new(ffmpeg)
         .args([
             "-hide_banner",
@@ -1323,7 +1473,12 @@ fn capture_rgb_frame_without_padding(
     }))
 }
 
-fn attach_problem_screenshots(problem: &mut Problem, file_path: &str, duration: f64, fps: Option<f64>) {
+fn attach_problem_screenshots(
+    problem: &mut Problem,
+    file_path: &str,
+    duration: f64,
+    fps: Option<f64>,
+) {
     let start_time = safe_frame_timestamp(problem.start_time, duration, fps);
     let end_time = safe_frame_timestamp(problem.end_time, duration, fps);
     let start = capture_frame_data_uri(file_path, start_time);
@@ -1422,9 +1577,7 @@ fn parse_rate(value: &str) -> Option<f64> {
 }
 
 fn parse_last_crop_suggestion(log: &str) -> Option<CropSuggestion> {
-    log.lines()
-        .filter_map(parse_crop_suggestion)
-        .last()
+    log.lines().filter_map(parse_crop_suggestion).last()
 }
 
 fn parse_crop_suggestion(line: &str) -> Option<CropSuggestion> {
@@ -1859,6 +2012,29 @@ mod tests {
     }
 
     #[test]
+    fn desktop_12_sample_detects_repeated_frames_when_available() {
+        let path = PathBuf::from("/Users/bey/Desktop/12.mp4");
+        if !path.exists() {
+            return;
+        }
+
+        let result = build_detection_result(
+            path.to_str().unwrap(),
+            &DetectionMode::Balanced,
+            &DetectionSettings::default(),
+        )
+        .unwrap();
+
+        let problem = result
+            .problems
+            .iter()
+            .find(|problem| problem.r#type == "夹帧/冻结帧")
+            .expect("12.mp4 should report repeated/frozen frames");
+        assert!(matches!(problem.level, RiskLevel::Red));
+        assert!(problem.description.contains("累计约"));
+    }
+
+    #[test]
     fn parses_freezedetect_segments() {
         let log = "[freezedetect @ 0x1] lavfi.freezedetect.freeze_start: 2.400000\n\
 [freezedetect @ 0x1] lavfi.freezedetect.freeze_duration: 2.600000\n\
@@ -1891,8 +2067,8 @@ mod tests {
             0,
             &FreezeSegment {
                 start: 1.0,
-                end: 2.2,
-                duration: 1.2,
+                end: 1.033333,
+                duration: 0.033333,
             },
         )
         .unwrap();
@@ -1900,8 +2076,8 @@ mod tests {
             1,
             &FreezeSegment {
                 start: 1.0,
-                end: 3.5,
-                duration: 2.5,
+                end: 1.133333,
+                duration: 0.133333,
             },
         )
         .unwrap();
@@ -1909,8 +2085,8 @@ mod tests {
             2,
             &FreezeSegment {
                 start: 1.0,
-                end: 6.5,
-                duration: 5.5,
+                end: 1.166667,
+                duration: 0.166667,
             },
         )
         .unwrap();
@@ -1918,6 +2094,91 @@ mod tests {
         assert!(matches!(green.level, RiskLevel::Green));
         assert!(matches!(yellow.level, RiskLevel::Yellow));
         assert!(matches!(red.level, RiskLevel::Red));
+    }
+
+    #[test]
+    fn repeated_frame_risk_uses_fps_not_seconds() {
+        let twenty_four_fps_red = build_frozen_frame_problem_with_fps(
+            0,
+            &FreezeSegment {
+                start: 4.0,
+                end: 4.208333,
+                duration: 0.208333,
+            },
+            Some(24.0),
+        )
+        .unwrap();
+        let sixty_fps_yellow = build_frozen_frame_problem_with_fps(
+            1,
+            &FreezeSegment {
+                start: 4.0,
+                end: 4.066667,
+                duration: 0.066667,
+            },
+            Some(60.0),
+        )
+        .unwrap();
+
+        assert!(matches!(twenty_four_fps_red.level, RiskLevel::Red));
+        assert!(twenty_four_fps_red.description.contains("5 帧"));
+        assert!(matches!(sixty_fps_yellow.level, RiskLevel::Yellow));
+        assert!(sixty_fps_yellow.description.contains("4 帧"));
+    }
+
+    #[test]
+    fn detection_mode_changes_freezedetect_cost_not_risk_thresholds() {
+        assert!(
+            (freezedetect_duration_threshold(&DetectionMode::Fast, Some(30.0)) - 0.166667).abs()
+                < 0.0001
+        );
+        assert!(
+            (freezedetect_duration_threshold(&DetectionMode::Balanced, Some(30.0)) - 0.066667)
+                .abs()
+                < 0.0001
+        );
+        assert!(
+            (freezedetect_duration_threshold(&DetectionMode::Accurate, Some(30.0)) - 0.033333)
+                .abs()
+                < 0.0001
+        );
+        assert!(
+            (freezedetect_duration_threshold(&DetectionMode::Balanced, Some(60.0)) - 0.033333)
+                .abs()
+                < 0.0001
+        );
+    }
+
+    #[test]
+    fn short_repeated_frame_segment_is_reported_by_frame_count() {
+        let segment = FreezeSegment {
+            start: 10.0,
+            end: 10.066667,
+            duration: 0.066667,
+        };
+
+        let problem = build_frozen_frame_problem(0, &segment)
+            .expect("2 repeated frames at 30fps should report");
+
+        assert!(matches!(problem.level, RiskLevel::Yellow));
+        assert!(problem.description.contains("2 帧"));
+        assert_eq!(problem.r#type, "夹帧/冻结帧");
+    }
+
+    #[test]
+    fn cumulative_repeated_frames_are_promoted_to_red() {
+        let segments = (0..10)
+            .map(|index| FreezeSegment {
+                start: index as f64,
+                end: index as f64 + 0.066667,
+                duration: 0.066667,
+            })
+            .collect::<Vec<_>>();
+
+        let problem = build_frozen_frame_summary_problem(&segments, Some(30.0))
+            .expect("20 cumulative repeated frames should report");
+
+        assert!(matches!(problem.level, RiskLevel::Red));
+        assert!(problem.description.contains("累计约 20 帧"));
     }
 
     #[test]
@@ -2230,7 +2491,12 @@ mod tests {
         }
     }
 
-    fn synthetic_letterboxed_frame(width: usize, height: usize, top: usize, bottom: usize) -> RgbFrame {
+    fn synthetic_letterboxed_frame(
+        width: usize,
+        height: usize,
+        top: usize,
+        bottom: usize,
+    ) -> RgbFrame {
         let mut data = vec![12_u8; width * height * 3];
         for y in top..height.saturating_sub(bottom) {
             for x in 0..width {
@@ -2249,7 +2515,14 @@ mod tests {
         }
     }
 
-    fn paint_mark(data: &mut [u8], width: usize, x0: usize, y0: usize, mark_width: usize, mark_height: usize) {
+    fn paint_mark(
+        data: &mut [u8],
+        width: usize,
+        x0: usize,
+        y0: usize,
+        mark_width: usize,
+        mark_height: usize,
+    ) {
         for y in y0..(y0 + mark_height) {
             for x in x0..(x0 + mark_width) {
                 let index = (y * width + x) * 3;
