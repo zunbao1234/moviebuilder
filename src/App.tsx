@@ -27,6 +27,8 @@ export default function App() {
     blackBorderYellowThreshold: 0.03,
     blackBorderRedThreshold: 0.1,
     blackBorderIrregularThreshold: 0.03,
+    aiLogoScoreThreshold: 0.12,
+    aiLogoMinHits: 2,
   });
   const [activeStage, setActiveStage] = useState("空闲");
   const [dragActive, setDragActive] = useState(false);

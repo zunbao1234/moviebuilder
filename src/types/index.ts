@@ -8,6 +8,8 @@ export interface DetectionSettings {
   blackBorderYellowThreshold: number;
   blackBorderRedThreshold: number;
   blackBorderIrregularThreshold: number;
+  aiLogoScoreThreshold: number;
+  aiLogoMinHits: number;
 }
 
 export interface VideoFile {

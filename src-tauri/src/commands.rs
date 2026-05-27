@@ -114,8 +114,8 @@ async fn run_detection(
         (8, "读取视频容器信息"),
         (22, "抽样分析画面边界"),
         (38, "计算帧间相似度"),
-        (56, "检查时间戳连续性"),
-        (74, "分析音频能量曲线"),
+        (56, "扫描四角疑似 AI 标识"),
+        (74, "检查时间戳连续性"),
         (91, "汇总风险等级"),
         (100, "生成检测结果"),
     ];
@@ -216,6 +216,12 @@ fn build_detection_result(
         }
     }
 
+    for (index, hit) in detect_ai_logo_marks(file_path, duration, settings)?.iter().enumerate() {
+        let mut problem = build_ai_logo_problem(index, hit);
+        attach_problem_screenshots(&mut problem, file_path, duration, probe.fps);
+        problems.push(problem);
+    }
+
     Ok(result_from_parts(
         problems,
         BasicVideoInfo {
@@ -278,6 +284,43 @@ struct FreezeSegment {
     start: f64,
     end: f64,
     duration: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Corner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl Corner {
+    fn label(self) -> &'static str {
+        match self {
+            Corner::TopLeft => "左上角",
+            Corner::TopRight => "右上角",
+            Corner::BottomLeft => "左下角",
+            Corner::BottomRight => "右下角",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct AiLogoHit {
+    corner: Corner,
+    hits: usize,
+    total_samples: usize,
+    max_score: f64,
+    start_time: f64,
+    end_time: f64,
+}
+
+#[derive(Debug, Clone)]
+struct RgbFrame {
+    width: usize,
+    height: usize,
+    timestamp: f64,
+    data: Vec<u8>,
 }
 
 fn probe_video(file_path: &str) -> Result<VideoProbe, String> {
@@ -511,6 +554,196 @@ fn build_frozen_frame_problem(index: usize, segment: &FreezeSegment) -> Option<P
         start_screenshot: None,
         end_screenshot: None,
     })
+}
+
+fn detect_ai_logo_marks(
+    file_path: &str,
+    duration: f64,
+    settings: &DetectionSettings,
+) -> Result<Vec<AiLogoHit>, String> {
+    let sample_times = ai_logo_sample_times(duration);
+    if sample_times.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut frames = Vec::new();
+    for timestamp in sample_times {
+        if let Some(frame) = capture_rgb_frame(file_path, timestamp, 320, 180)? {
+            frames.push(frame);
+        }
+    }
+
+    Ok(analyze_ai_logo_frames(&frames, settings))
+}
+
+fn ai_logo_sample_times(duration: f64) -> Vec<f64> {
+    if duration <= 0.5 {
+        return Vec::new();
+    }
+
+    let mut times = vec![0.5, duration * 0.33, duration * 0.66, (duration - 0.5).max(0.5)];
+    times.iter_mut().for_each(|time| *time = time.clamp(0.0, duration));
+    times.sort_by(f64::total_cmp);
+    times.dedup_by(|a, b| (*a - *b).abs() < 0.25);
+    times
+}
+
+fn analyze_ai_logo_frames(frames: &[RgbFrame], settings: &DetectionSettings) -> Vec<AiLogoHit> {
+    [Corner::TopLeft, Corner::TopRight, Corner::BottomLeft, Corner::BottomRight]
+        .into_iter()
+        .filter_map(|corner| {
+            let mut hits = 0;
+            let mut max_score = 0.0_f64;
+            let mut start_time = None;
+            let mut end_time = None;
+
+            for frame in frames {
+                let score = corner_mark_score(frame, corner);
+                max_score = max_score.max(score);
+                if score >= settings.ai_logo_score_threshold {
+                    hits += 1;
+                    start_time.get_or_insert(frame.timestamp);
+                    end_time = Some(frame.timestamp);
+                }
+            }
+
+            (hits >= settings.ai_logo_min_hits).then(|| AiLogoHit {
+                corner,
+                hits,
+                total_samples: frames.len(),
+                max_score,
+                start_time: start_time.unwrap_or(0.0),
+                end_time: end_time.unwrap_or(0.0),
+            })
+        })
+        .collect()
+}
+
+fn corner_mark_score(frame: &RgbFrame, corner: Corner) -> f64 {
+    if frame.width == 0 || frame.height == 0 || frame.data.len() < frame.width * frame.height * 3 {
+        return 0.0;
+    }
+
+    let corner_width = (frame.width / 4).max(24).min(frame.width);
+    let corner_height = (frame.height / 4).max(24).min(frame.height);
+    let margin_x = (frame.width / 40).max(2).min(frame.width.saturating_sub(1));
+    let margin_y = (frame.height / 40).max(2).min(frame.height.saturating_sub(1));
+
+    let (x0, y0) = match corner {
+        Corner::TopLeft => (margin_x, margin_y),
+        Corner::TopRight => (frame.width.saturating_sub(corner_width + margin_x), margin_y),
+        Corner::BottomLeft => (margin_x, frame.height.saturating_sub(corner_height + margin_y)),
+        Corner::BottomRight => (
+            frame.width.saturating_sub(corner_width + margin_x),
+            frame.height.saturating_sub(corner_height + margin_y),
+        ),
+    };
+
+    let mut high_contrast = 0_usize;
+    let mut textured = 0_usize;
+    let mut total = 0_usize;
+
+    for y in y0..(y0 + corner_height).min(frame.height.saturating_sub(1)) {
+        for x in x0..(x0 + corner_width).min(frame.width.saturating_sub(1)) {
+            let current = luminance_at(frame, x, y);
+            let right = luminance_at(frame, x + 1, y);
+            let down = luminance_at(frame, x, y + 1);
+            let edge = (current - right).abs().max((current - down).abs());
+            if edge > 70.0 {
+                high_contrast += 1;
+            }
+            if edge > 25.0 {
+                textured += 1;
+            }
+            total += 1;
+        }
+    }
+
+    if total == 0 {
+        return 0.0;
+    }
+
+    let high_ratio = high_contrast as f64 / total as f64;
+    let texture_ratio = textured as f64 / total as f64;
+    (high_ratio * 0.75 + texture_ratio * 0.25).min(1.0)
+}
+
+fn luminance_at(frame: &RgbFrame, x: usize, y: usize) -> f64 {
+    let index = (y * frame.width + x) * 3;
+    let r = frame.data[index] as f64;
+    let g = frame.data[index + 1] as f64;
+    let b = frame.data[index + 2] as f64;
+    0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
+fn build_ai_logo_problem(index: usize, hit: &AiLogoHit) -> Problem {
+    Problem {
+        id: format!("ai-logo-real-{index}"),
+        r#type: "疑似 AI 标识".to_string(),
+        level: RiskLevel::Red,
+        start_time: hit.start_time,
+        end_time: hit.end_time.max(hit.start_time),
+        description: format!(
+            "四角泛化检测：{}在 {}/{} 个抽样帧中出现稳定高对比小标识痕迹，最高分 {:.3}。按规则疑似 AI 标识归为红线，请人工复核。",
+            hit.corner.label(),
+            hit.hits,
+            hit.total_samples,
+            hit.max_score
+        ),
+        screenshot: None,
+        start_screenshot: None,
+        end_screenshot: None,
+    }
+}
+
+fn capture_rgb_frame(
+    file_path: &str,
+    timestamp: f64,
+    width: usize,
+    height: usize,
+) -> Result<Option<RgbFrame>, String> {
+    let ffmpeg = find_ffmpeg_binary()
+        .ok_or_else(|| "未找到 ffmpeg，无法执行 AI 标识检测。请安装 ffmpeg 或配置 sidecar。".to_string())?;
+    let output = Command::new(ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            &format!("{:.3}", timestamp.max(0.0)),
+            "-i",
+            file_path,
+            "-frames:v",
+            "1",
+            "-vf",
+            &format!("scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"),
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "pipe:1",
+        ])
+        .output()
+        .map_err(|error| format!("执行 FFmpeg AI 标识抽帧失败：{error}"))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "FFmpeg AI 标识抽帧失败：{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let expected = width * height * 3;
+    if output.stdout.len() < expected {
+        return Ok(None);
+    }
+
+    Ok(Some(RgbFrame {
+        width,
+        height,
+        timestamp,
+        data: output.stdout[..expected].to_vec(),
+    }))
 }
 
 fn attach_problem_screenshots(problem: &mut Problem, file_path: &str, duration: f64, fps: Option<f64>) {
@@ -935,6 +1168,7 @@ mod tests {
             black_border_yellow_threshold: 0.02,
             black_border_red_threshold: 0.10,
             black_border_irregular_threshold: 0.03,
+            ..DetectionSettings::default()
         };
         let problem = build_black_border_problem(
             720,
@@ -1016,6 +1250,50 @@ mod tests {
     }
 
     #[test]
+    fn ai_logo_corner_score_detects_high_contrast_mark() {
+        let frame = synthetic_corner_mark_frame(Corner::TopRight, true);
+
+        let score = corner_mark_score(&frame, Corner::TopRight);
+        let opposite = corner_mark_score(&frame, Corner::BottomLeft);
+
+        assert!(score >= 0.12, "score was {score}");
+        assert!(opposite < 0.02, "opposite score was {opposite}");
+    }
+
+    #[test]
+    fn ai_logo_analysis_requires_repeated_hits() {
+        let settings = DetectionSettings::default();
+        let frames = vec![
+            synthetic_corner_mark_frame(Corner::TopRight, true),
+            synthetic_corner_mark_frame(Corner::TopRight, true),
+            synthetic_corner_mark_frame(Corner::TopRight, false),
+        ];
+
+        let hits = analyze_ai_logo_frames(&frames, &settings);
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].corner, Corner::TopRight);
+        assert_eq!(hits[0].hits, 2);
+    }
+
+    #[test]
+    fn ai_logo_problem_is_red_line() {
+        let hit = AiLogoHit {
+            corner: Corner::TopLeft,
+            hits: 3,
+            total_samples: 4,
+            max_score: 0.2,
+            start_time: 0.5,
+            end_time: 10.0,
+        };
+
+        let problem = build_ai_logo_problem(0, &hit);
+
+        assert!(matches!(problem.level, RiskLevel::Red));
+        assert_eq!(problem.r#type, "疑似 AI 标识");
+    }
+
+    #[test]
     fn reads_duration_from_mvhd_atom() {
         let path = std::env::temp_dir().join("video_inspector_mvhd_duration.mp4");
         write_minimal_mp4_with_duration(&path, 125, 1_000);
@@ -1056,5 +1334,37 @@ mod tests {
         bytes.extend_from_slice(&kind);
         bytes.extend_from_slice(payload);
         bytes
+    }
+
+    fn synthetic_corner_mark_frame(corner: Corner, with_mark: bool) -> RgbFrame {
+        let width = 160;
+        let height = 90;
+        let mut data = vec![32_u8; width * height * 3];
+
+        if with_mark {
+            let (x0, y0) = match corner {
+                Corner::TopLeft => (10, 8),
+                Corner::TopRight => (width - 42, 8),
+                Corner::BottomLeft => (10, height - 28),
+                Corner::BottomRight => (width - 42, height - 28),
+            };
+
+            for y in y0..(y0 + 18) {
+                for x in x0..(x0 + 30) {
+                    let index = (y * width + x) * 3;
+                    let value = if (x + y) % 4 < 2 { 245 } else { 20 };
+                    data[index] = value;
+                    data[index + 1] = value;
+                    data[index + 2] = value;
+                }
+            }
+        }
+
+        RgbFrame {
+            width,
+            height,
+            timestamp: 1.0,
+            data,
+        }
     }
 }

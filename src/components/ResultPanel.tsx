@@ -93,7 +93,7 @@ function InfoPanel({ result }: { result: DetectionResult }) {
           检测说明
         </div>
         <p className="text-xs leading-5 text-slate-500">
-          当前版本读取真实视频基础信息，并使用 FFmpeg cropdetect/freezedetect 进行黑边和冻结帧检测；跳帧、音频等项目仍在后续接入。
+          当前版本读取真实视频基础信息，并使用 FFmpeg 执行黑边、冻结帧和四角疑似 AI 标识检测；跳帧、音频等项目仍在后续接入。
         </p>
       </div>
     </aside>

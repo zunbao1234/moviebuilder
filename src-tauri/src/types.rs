@@ -33,6 +33,8 @@ pub struct DetectionSettings {
     pub black_border_yellow_threshold: f64,
     pub black_border_red_threshold: f64,
     pub black_border_irregular_threshold: f64,
+    pub ai_logo_score_threshold: f64,
+    pub ai_logo_min_hits: usize,
 }
 
 impl Default for DetectionSettings {
@@ -41,6 +43,8 @@ impl Default for DetectionSettings {
             black_border_yellow_threshold: 0.03,
             black_border_red_threshold: 0.10,
             black_border_irregular_threshold: 0.03,
+            ai_logo_score_threshold: 0.12,
+            ai_logo_min_hits: 2,
         }
     }
 }
