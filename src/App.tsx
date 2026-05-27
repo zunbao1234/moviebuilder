@@ -12,6 +12,7 @@ import type {
   DetectionCompletePayload,
   DetectionErrorPayload,
   DetectionMode,
+  DetectionSettings,
   DetectionProgressPayload,
   VideoFile,
 } from "./types";
@@ -22,6 +23,11 @@ export default function App() {
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [isDetecting, setIsDetecting] = useState(false);
   const [mode, setMode] = useState<DetectionMode>("balanced");
+  const [settings, setSettings] = useState<DetectionSettings>({
+    blackBorderYellowThreshold: 0.03,
+    blackBorderRedThreshold: 0.1,
+    blackBorderIrregularThreshold: 0.03,
+  });
   const [activeStage, setActiveStage] = useState("空闲");
   const [dragActive, setDragActive] = useState(false);
   const [lastReportPath, setLastReportPath] = useState<string | null>(null);
@@ -202,6 +208,7 @@ export default function App() {
       await invoke("start_detection", {
         files: targetFiles.map((file) => file.path),
         mode,
+        settings,
       });
     } catch (error) {
       setIsDetecting(false);
@@ -258,7 +265,7 @@ export default function App() {
       return;
     }
 
-    const reportPath = await invoke<string>("generate_html_report", { filePath: selectedFile.path });
+    const reportPath = await invoke<string>("generate_html_report", { filePath: selectedFile.path, settings });
     setLastReportPath(reportPath);
   }
 
@@ -269,6 +276,8 @@ export default function App() {
         hasFiles={files.length > 0}
         mode={mode}
         onModeChange={setMode}
+        settings={settings}
+        onSettingsChange={setSettings}
         onImportFiles={handleImportFiles}
         onImportFolder={handleImportFolder}
         onStartDetection={handleStartDetection}

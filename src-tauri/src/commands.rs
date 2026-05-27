@@ -2,7 +2,7 @@ use crate::{
     report::write_html_report,
     types::{
         AppState, BasicVideoInfo, DetectionCompletePayload, DetectionErrorPayload, DetectionMode,
-        DetectionProgressPayload, DetectionResult, Problem, RiskLevel,
+        DetectionProgressPayload, DetectionResult, DetectionSettings, Problem, RiskLevel,
     },
 };
 use serde_json::Value;
@@ -39,6 +39,7 @@ pub async fn start_detection(
     state: State<'_, AppState>,
     files: Vec<String>,
     mode: DetectionMode,
+    settings: Option<DetectionSettings>,
 ) -> Result<(), String> {
     state.reset_run_state();
 
@@ -61,7 +62,7 @@ pub async fn start_detection(
             continue;
         }
 
-        run_detection(&app, &state, &file_path, &mode).await?;
+        run_detection(&app, &state, &file_path, &mode, settings.clone().unwrap_or_default()).await?;
     }
 
     Ok(())
@@ -81,14 +82,25 @@ pub fn cancel_detection(state: State<'_, AppState>, app: AppHandle) -> Result<()
 }
 
 #[tauri::command]
-pub fn generate_html_report(file_path: String) -> Result<String, String> {
-    let result = build_detection_result(&file_path, &DetectionMode::Balanced)?;
+pub fn generate_html_report(
+    file_path: String,
+    settings: Option<DetectionSettings>,
+) -> Result<String, String> {
+    let result = build_detection_result(
+        &file_path,
+        &DetectionMode::Balanced,
+        &settings.unwrap_or_default(),
+    )?;
     write_html_report(&file_path, &result)
 }
 
 #[tauri::command]
-pub fn inspect_file(file_path: String, mode: DetectionMode) -> Result<DetectionResult, String> {
-    build_detection_result(&file_path, &mode)
+pub fn inspect_file(
+    file_path: String,
+    mode: DetectionMode,
+    settings: Option<DetectionSettings>,
+) -> Result<DetectionResult, String> {
+    build_detection_result(&file_path, &mode, &settings.unwrap_or_default())
 }
 
 async fn run_detection(
@@ -96,6 +108,7 @@ async fn run_detection(
     state: &State<'_, AppState>,
     file_path: &str,
     mode: &DetectionMode,
+    settings: DetectionSettings,
 ) -> Result<(), String> {
     let stages = [
         (8, "读取视频容器信息"),
@@ -142,7 +155,7 @@ async fn run_detection(
         sleep(Duration::from_millis(delay_ms)).await;
     }
 
-    let result = match build_detection_result(file_path, mode) {
+    let result = match build_detection_result(file_path, mode, &settings) {
         Ok(result) => result,
         Err(message) => {
             app.emit(
@@ -168,7 +181,11 @@ async fn run_detection(
     Ok(())
 }
 
-fn build_detection_result(file_path: &str, mode: &DetectionMode) -> Result<DetectionResult, String> {
+fn build_detection_result(
+    file_path: &str,
+    mode: &DetectionMode,
+    settings: &DetectionSettings,
+) -> Result<DetectionResult, String> {
     let file_size = fs::metadata(file_path)
         .map(|metadata| metadata.len() as f64 / 1024.0 / 1024.0)
         .unwrap_or(128.0);
@@ -184,7 +201,7 @@ fn build_detection_result(file_path: &str, mode: &DetectionMode) -> Result<Detec
     if let (Some(source_width), Some(source_height)) = (probe.width, probe.height) {
         if let Some(crop) = detect_black_borders(file_path, mode)? {
             if let Some(mut problem) =
-                build_black_border_problem(source_width, source_height, &crop, duration)
+                build_black_border_problem(source_width, source_height, &crop, duration, settings)
             {
                 attach_problem_screenshots(&mut problem, file_path, duration, probe.fps);
                 problems.push(problem);
@@ -367,6 +384,7 @@ fn build_black_border_problem(
     source_height: u32,
     crop: &CropSuggestion,
     duration: f64,
+    settings: &DetectionSettings,
 ) -> Option<Problem> {
     if crop.width == 0
         || crop.height == 0
@@ -388,11 +406,15 @@ fn build_black_border_problem(
         return None;
     }
 
-    let irregular = (left.abs_diff(right) as f64 / source_width as f64) >= 0.03
-        || (top.abs_diff(bottom) as f64 / source_height as f64) >= 0.03;
-    let level = if max_ratio >= 0.10 || (irregular && max_ratio >= 0.03) {
+    let irregular =
+        (left.abs_diff(right) as f64 / source_width as f64) >= settings.black_border_irregular_threshold
+            || (top.abs_diff(bottom) as f64 / source_height as f64)
+                >= settings.black_border_irregular_threshold;
+    let level = if max_ratio >= settings.black_border_red_threshold
+        || (irregular && max_ratio >= settings.black_border_yellow_threshold)
+    {
         RiskLevel::Red
-    } else if max_ratio >= 0.03 {
+    } else if max_ratio >= settings.black_border_yellow_threshold {
         RiskLevel::Yellow
     } else {
         RiskLevel::Green
@@ -799,7 +821,11 @@ mod tests {
         let path = std::env::temp_dir().join("video_inspector_short_duration.mp4");
         write_minimal_mp4_with_duration(&path, 10, 1_000);
 
-        let result = build_detection_result(path.to_str().unwrap(), &DetectionMode::Balanced);
+        let result = build_detection_result(
+            path.to_str().unwrap(),
+            &DetectionMode::Balanced,
+            &DetectionSettings::default(),
+        );
 
         assert!(result.is_err());
         let _ = fs::remove_file(path);
@@ -810,7 +836,11 @@ mod tests {
         let path = std::env::temp_dir().join("video_inspector_no_evidence.mp4");
         write_minimal_mp4_with_duration(&path, 10, 1_000);
 
-        let result = build_detection_result(path.to_str().unwrap(), &DetectionMode::Balanced);
+        let result = build_detection_result(
+            path.to_str().unwrap(),
+            &DetectionMode::Balanced,
+            &DetectionSettings::default(),
+        );
 
         assert!(result.is_err());
         let _ = fs::remove_file(path);
@@ -845,6 +875,7 @@ mod tests {
                 y: 75,
             },
             30.0,
+            &DetectionSettings::default(),
         )
         .unwrap();
         let red = build_black_border_problem(
@@ -857,6 +888,7 @@ mod tests {
                 y: 120,
             },
             30.0,
+            &DetectionSettings::default(),
         )
         .unwrap();
         let green = build_black_border_problem(
@@ -869,6 +901,7 @@ mod tests {
                 y: 20,
             },
             30.0,
+            &DetectionSettings::default(),
         )
         .unwrap();
 
@@ -889,10 +922,35 @@ mod tests {
                 y: 0,
             },
             17.647,
+            &DetectionSettings::default(),
         )
         .unwrap();
 
         assert!(matches!(problem.level, RiskLevel::Green));
+    }
+
+    #[test]
+    fn custom_black_border_threshold_can_promote_green_to_yellow() {
+        let settings = DetectionSettings {
+            black_border_yellow_threshold: 0.02,
+            black_border_red_threshold: 0.10,
+            black_border_irregular_threshold: 0.03,
+        };
+        let problem = build_black_border_problem(
+            720,
+            1280,
+            &CropSuggestion {
+                width: 700,
+                height: 1248,
+                x: 10,
+                y: 0,
+            },
+            17.647,
+            &settings,
+        )
+        .unwrap();
+
+        assert!(matches!(problem.level, RiskLevel::Yellow));
     }
 
     #[test]

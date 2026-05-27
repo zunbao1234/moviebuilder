@@ -28,7 +28,7 @@ export default function ResultPanel({ file }: ResultPanelProps) {
   const result = file?.result ?? null;
 
   return (
-    <section className="flex h-[360px] flex-col overflow-hidden rounded border border-slate-700 bg-slate-900 shadow-inspector">
+    <section className="flex min-h-[420px] flex-[1.25] flex-col overflow-hidden rounded border border-slate-700 bg-slate-900 shadow-inspector">
       <div className="flex h-12 items-center justify-between border-b border-slate-700 px-4">
         <div>
           <h2 className="text-sm font-semibold text-slate-100">检测结果详情</h2>
@@ -49,7 +49,7 @@ export default function ResultPanel({ file }: ResultPanelProps) {
         <div className="grid flex-1 grid-cols-[280px_1fr] overflow-hidden">
           <InfoPanel result={result} />
           <div className="overflow-auto p-4">
-            <div className="grid gap-4">
+            <div className="grid gap-4 xl:grid-cols-3">
               {(["red", "yellow", "green"] as RiskLevel[]).map((level) => (
                 <ProblemGroup key={level} level={level} result={result} />
               ))}
@@ -128,7 +128,7 @@ function ProblemGroup({ level, result }: { level: RiskLevel; result: DetectionRe
           <p className="text-sm opacity-70">{hasAnyProblem ? meta.empty : "真实检测未发现该级别问题"}</p>
         ) : (
           problems.map((problem, index) => (
-            <article key={problem.id} className="grid grid-cols-[210px_1fr] gap-3 rounded border border-current/15 bg-slate-950/30 p-3">
+            <article key={problem.id} className="grid gap-3 rounded border border-current/15 bg-slate-950/30 p-3">
               <div className="grid grid-cols-2 gap-2">
                 <Shot label="开始" src={problem.startScreenshot ?? problem.screenshot} alt={`${problem.type}开始截图`} />
                 <Shot label="结束" src={problem.endScreenshot ?? problem.screenshot} alt={`${problem.type}结束截图`} />

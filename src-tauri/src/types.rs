@@ -29,6 +29,24 @@ pub struct BasicVideoInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DetectionSettings {
+    pub black_border_yellow_threshold: f64,
+    pub black_border_red_threshold: f64,
+    pub black_border_irregular_threshold: f64,
+}
+
+impl Default for DetectionSettings {
+    fn default() -> Self {
+        Self {
+            black_border_yellow_threshold: 0.03,
+            black_border_red_threshold: 0.10,
+            black_border_irregular_threshold: 0.03,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Problem {
     pub id: String,
     pub r#type: String,

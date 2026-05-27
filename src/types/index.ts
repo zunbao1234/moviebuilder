@@ -4,6 +4,12 @@ export type RiskLevel = "red" | "yellow" | "green";
 
 export type DetectionMode = "fast" | "balanced" | "accurate";
 
+export interface DetectionSettings {
+  blackBorderYellowThreshold: number;
+  blackBorderRedThreshold: number;
+  blackBorderIrregularThreshold: number;
+}
+
 export interface VideoFile {
   path: string;
   name: string;

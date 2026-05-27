@@ -9,13 +9,15 @@ import {
   Trash2,
   Upload,
 } from "lucide-react";
-import type { DetectionMode } from "../types";
+import type { DetectionMode, DetectionSettings } from "../types";
 
 interface ToolbarProps {
   isDetecting: boolean;
   hasFiles: boolean;
   mode: DetectionMode;
   onModeChange: (mode: DetectionMode) => void;
+  settings: DetectionSettings;
+  onSettingsChange: (settings: DetectionSettings) => void;
   onImportFiles: () => void;
   onImportFolder: () => void;
   onStartDetection: () => void;
@@ -36,6 +38,8 @@ export default function Toolbar({
   hasFiles,
   mode,
   onModeChange,
+  settings,
+  onSettingsChange,
   onImportFiles,
   onImportFolder,
   onStartDetection,
@@ -45,7 +49,7 @@ export default function Toolbar({
   onExportReport,
 }: ToolbarProps) {
   return (
-    <header className="flex min-h-16 items-center justify-between border-b border-slate-700/80 bg-slate-950/95 px-4">
+    <header className="flex min-h-16 flex-wrap items-center justify-between gap-3 border-b border-slate-700/80 bg-slate-950/95 px-4 py-3">
       <div className="flex items-center gap-3">
         <div className="flex h-10 w-10 items-center justify-center rounded bg-blue-500 text-slate-950">
           <Settings2 size={20} strokeWidth={2.4} />
@@ -74,6 +78,31 @@ export default function Toolbar({
             </button>
           ))}
         </div>
+        <ThresholdInput
+          label="黑边黄线"
+          value={settings.blackBorderYellowThreshold}
+          min={0.005}
+          max={0.2}
+          onChange={(value) =>
+            onSettingsChange({
+              ...settings,
+              blackBorderYellowThreshold: value,
+              blackBorderRedThreshold: Math.max(settings.blackBorderRedThreshold, value + 0.01),
+            })
+          }
+        />
+        <ThresholdInput
+          label="黑边红线"
+          value={settings.blackBorderRedThreshold}
+          min={0.02}
+          max={0.3}
+          onChange={(value) =>
+            onSettingsChange({
+              ...settings,
+              blackBorderRedThreshold: Math.max(value, settings.blackBorderYellowThreshold + 0.01),
+            })
+          }
+        />
         <ToolbarButton icon={<Upload size={16} />} label="导入文件" onClick={onImportFiles} />
         <ToolbarButton icon={<FolderOpen size={16} />} label="导入文件夹" onClick={onImportFolder} />
         <ToolbarButton
@@ -109,6 +138,42 @@ export default function Toolbar({
         />
       </div>
     </header>
+  );
+}
+
+function ThresholdInput({
+  label,
+  value,
+  min,
+  max,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <label className="flex h-9 items-center gap-2 rounded border border-slate-700 bg-slate-900 px-2 text-xs text-slate-300">
+      <span className="whitespace-nowrap">{label}</span>
+      <input
+        type="number"
+        min={min * 100}
+        max={max * 100}
+        step={0.5}
+        value={(value * 100).toFixed(1)}
+        onChange={(event) => {
+          const next = Number(event.target.value);
+          if (Number.isFinite(next)) {
+            onChange(Math.min(max, Math.max(min, next / 100)));
+          }
+        }}
+        className="h-6 w-16 rounded border border-slate-700 bg-slate-950 px-2 text-right text-slate-100 outline-none focus:border-blue-400"
+        title={`${label}阈值百分比`}
+      />
+      <span className="text-slate-500">%</span>
+    </label>
   );
 }
 
