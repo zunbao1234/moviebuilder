@@ -84,13 +84,17 @@ pub fn cancel_detection(state: State<'_, AppState>, app: AppHandle) -> Result<()
 #[tauri::command]
 pub fn generate_html_report(
     file_path: String,
+    result: Option<DetectionResult>,
     settings: Option<DetectionSettings>,
 ) -> Result<String, String> {
-    let result = build_detection_result(
-        &file_path,
-        &DetectionMode::Balanced,
-        &settings.unwrap_or_default(),
-    )?;
+    let result = match result {
+        Some(result) => result,
+        None => build_detection_result(
+            &file_path,
+            &DetectionMode::Balanced,
+            &settings.unwrap_or_default(),
+        )?,
+    };
     write_html_report(&file_path, &result)
 }
 
@@ -1819,6 +1823,45 @@ mod tests {
         assert_eq!(base64_encode(b"f"), "Zg==");
         assert_eq!(base64_encode(b"fo"), "Zm8=");
         assert_eq!(base64_encode(b"foo"), "Zm9v");
+    }
+
+    #[test]
+    fn report_export_uses_supplied_detection_result() {
+        let path = std::env::temp_dir().join("video_inspector_supplied_report_result.mp4");
+        write_minimal_mp4_with_duration(&path, 10, 1_000);
+        let result = result_from_parts(
+            vec![Problem {
+                id: "manual-red-1".to_string(),
+                r#type: "导出一致性问题".to_string(),
+                level: RiskLevel::Red,
+                start_time: 1.0,
+                end_time: 2.0,
+                description: "来自前端当前结果，而不是重新检测。".to_string(),
+                screenshot: None,
+                start_screenshot: None,
+                end_screenshot: None,
+            }],
+            BasicVideoInfo {
+                duration: 10.0,
+                resolution: "1920x1080".to_string(),
+                fps: 30.0,
+                codec: "h264".to_string(),
+                file_size: 1.0,
+            },
+        );
+
+        let report_path = generate_html_report(
+            path.to_string_lossy().to_string(),
+            Some(result),
+            Some(DetectionSettings::default()),
+        )
+        .unwrap();
+        let html = fs::read_to_string(&report_path).unwrap();
+
+        assert!(html.contains("导出一致性问题"));
+        assert!(html.contains("来自前端当前结果"));
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(report_path);
     }
 
     fn write_minimal_mp4_with_duration(path: &Path, seconds: u32, timescale: u32) {

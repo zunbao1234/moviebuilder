@@ -268,14 +268,30 @@ export default function App() {
   }
 
   async function handleExportReport() {
-    if (!selectedFile) return;
+    if (!selectedFile?.result) {
+      setActiveStage("请先完成当前文件检测后再导出报告");
+      return;
+    }
     if (!isTauriRuntime()) {
       console.info("报告导出需要在 Tauri 桌面运行时中使用。");
+      setActiveStage("报告导出需要 Tauri 运行时");
       return;
     }
 
-    const reportPath = await invoke<string>("generate_html_report", { filePath: selectedFile.path, settings });
-    setLastReportPath(reportPath);
+    try {
+      setActiveStage("正在导出报告");
+      const reportPath = await invoke<string>("generate_html_report", {
+        filePath: selectedFile.path,
+        result: selectedFile.result,
+        settings,
+      });
+      setLastReportPath(reportPath);
+      setActiveStage("报告已导出");
+    } catch (error) {
+      const message = `报告导出失败：${String(error)}`;
+      setActiveStage(message);
+      console.error(error);
+    }
   }
 
   return (
@@ -293,10 +309,11 @@ export default function App() {
         onPauseDetection={handlePauseDetection}
         onCancelDetection={handleCancelDetection}
         onClearList={handleClearList}
+        canExportReport={Boolean(selectedFile?.result)}
         onExportReport={handleExportReport}
       />
 
-      <main className="flex min-h-0 flex-1 flex-col gap-4 bg-[radial-gradient(circle_at_20%_0%,rgba(59,130,246,0.14),transparent_34%),#0f172a] p-4">
+      <main className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto bg-[radial-gradient(circle_at_20%_0%,rgba(59,130,246,0.14),transparent_34%),#0f172a] p-4">
         {lastReportPath && (
           <div className="rounded border border-green-400/30 bg-green-400/10 px-4 py-2 text-sm text-green-100">
             报告已生成：{lastReportPath}

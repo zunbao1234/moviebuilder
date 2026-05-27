@@ -24,6 +24,7 @@ interface ToolbarProps {
   onPauseDetection: () => void;
   onCancelDetection: () => void;
   onClearList: () => void;
+  canExportReport: boolean;
   onExportReport: () => void;
 }
 
@@ -46,6 +47,7 @@ export default function Toolbar({
   onPauseDetection,
   onCancelDetection,
   onClearList,
+  canExportReport,
   onExportReport,
 }: ToolbarProps) {
   return (
@@ -164,7 +166,7 @@ export default function Toolbar({
           icon={<FileDown size={16} />}
           label="导出报告"
           onClick={onExportReport}
-          disabled={!hasFiles || isDetecting}
+          disabled={!canExportReport || isDetecting}
         />
         <ToolbarButton
           icon={<Trash2 size={16} />}
