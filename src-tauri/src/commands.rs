@@ -203,10 +203,23 @@ fn build_detection_result(
     let mut problems = Vec::new();
 
     if let (Some(source_width), Some(source_height)) = (probe.width, probe.height) {
-        if let Some(crop) = detect_black_borders(file_path, mode)? {
+        let cropdetect_problem = detect_black_borders(file_path, mode)?
+            .filter(|crop| crop_has_visible_border(source_width, source_height, crop))
+            .and_then(|crop| build_black_border_problem(source_width, source_height, &crop, duration, settings));
+
+        if let Some(mut problem) = cropdetect_problem {
+            attach_problem_screenshots(&mut problem, file_path, duration, probe.fps);
+            problems.push(problem);
+        } else if let Some(crop) =
+            detect_edge_black_borders(file_path, duration, mode, source_width, source_height)?
+        {
             if let Some(mut problem) =
                 build_black_border_problem(source_width, source_height, &crop, duration, settings)
             {
+                problem.description = format!(
+                    "{} 边缘黑像素占比兜底检测命中，FFmpeg cropdetect 未给出有效裁剪建议。",
+                    problem.description
+                );
                 attach_problem_screenshots(&mut problem, file_path, duration, probe.fps);
                 problems.push(problem);
             }
@@ -287,6 +300,14 @@ struct CropSuggestion {
     height: u32,
     x: u32,
     y: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct EdgeBlackBorders {
+    left: usize,
+    right: usize,
+    top: usize,
+    bottom: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -445,6 +466,187 @@ fn detect_black_borders(file_path: &str, mode: &DetectionMode) -> Result<Option<
 
     let log = String::from_utf8_lossy(&output.stderr);
     Ok(parse_last_crop_suggestion(&log))
+}
+
+fn crop_has_visible_border(source_width: u32, source_height: u32, crop: &CropSuggestion) -> bool {
+    if crop.width == 0
+        || crop.height == 0
+        || crop.width > source_width
+        || crop.height > source_height
+    {
+        return false;
+    }
+
+    crop.x > 0
+        || crop.y > 0
+        || source_width.saturating_sub(crop.width + crop.x) > 0
+        || source_height.saturating_sub(crop.height + crop.y) > 0
+}
+
+fn detect_edge_black_borders(
+    file_path: &str,
+    duration: f64,
+    mode: &DetectionMode,
+    source_width: u32,
+    source_height: u32,
+) -> Result<Option<CropSuggestion>, String> {
+    let sample_times = black_border_sample_times(duration, mode);
+    let (frame_width, frame_height) = black_border_frame_size(source_width, source_height);
+    let mut best = None;
+    let mut best_score = 0_u32;
+
+    for timestamp in sample_times {
+        if let Some(frame) = capture_rgb_frame_without_padding(file_path, timestamp, frame_width, frame_height)? {
+            if let Some(crop) = crop_from_edge_black_borders(&frame) {
+                let border_score = crop.x
+                    + crop.y
+                    + (frame.width as u32).saturating_sub(crop.x + crop.width)
+                    + (frame.height as u32).saturating_sub(crop.y + crop.height);
+                if border_score > best_score {
+                    best_score = border_score;
+                    best = Some(scale_crop_to_source(
+                        &crop,
+                        frame.width as u32,
+                        frame.height as u32,
+                        source_width,
+                        source_height,
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(best)
+}
+
+fn black_border_frame_size(source_width: u32, source_height: u32) -> (usize, usize) {
+    if source_width == 0 || source_height == 0 {
+        return (270, 480);
+    }
+
+    let max_side = 480.0;
+    let ratio = source_width as f64 / source_height as f64;
+    if ratio >= 1.0 {
+        let width = max_side as usize;
+        let height = (max_side / ratio).round().max(16.0) as usize;
+        (width, height)
+    } else {
+        let height = max_side as usize;
+        let width = (max_side * ratio).round().max(16.0) as usize;
+        (width, height)
+    }
+}
+
+fn black_border_sample_times(duration: f64, mode: &DetectionMode) -> Vec<f64> {
+    if duration <= 0.5 {
+        return Vec::new();
+    }
+
+    let ratios: &[f64] = match mode {
+        DetectionMode::Fast => &[0.25, 0.5, 0.75],
+        DetectionMode::Balanced => &[0.12, 0.25, 0.5, 0.75, 0.9],
+        DetectionMode::Accurate => &[0.08, 0.16, 0.25, 0.33, 0.5, 0.66, 0.75, 0.84, 0.92],
+    };
+    let mut times = ratios
+        .iter()
+        .map(|ratio| (duration * ratio).clamp(0.5, (duration - 0.2).max(0.5)))
+        .collect::<Vec<_>>();
+    times.sort_by(f64::total_cmp);
+    times.dedup_by(|a, b| (*a - *b).abs() < 0.25);
+    times
+}
+
+fn crop_from_edge_black_borders(frame: &RgbFrame) -> Option<CropSuggestion> {
+    if frame.width < 16 || frame.height < 16 || frame.data.len() < frame.width * frame.height * 3 {
+        return None;
+    }
+
+    let borders = EdgeBlackBorders {
+        top: scan_black_rows_from_top(frame),
+        bottom: scan_black_rows_from_bottom(frame),
+        left: scan_black_columns_from_left(frame),
+        right: scan_black_columns_from_right(frame),
+    };
+    let min_pixels = ((frame.width.min(frame.height) as f64) * 0.015).ceil() as usize;
+    if borders.top.max(borders.bottom).max(borders.left).max(borders.right) < min_pixels.max(2) {
+        return None;
+    }
+
+    let x = borders.left.min(frame.width.saturating_sub(1));
+    let y = borders.top.min(frame.height.saturating_sub(1));
+    let width = frame.width.saturating_sub(borders.left + borders.right);
+    let height = frame.height.saturating_sub(borders.top + borders.bottom);
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    Some(CropSuggestion {
+        width: width as u32,
+        height: height as u32,
+        x: x as u32,
+        y: y as u32,
+    })
+}
+
+fn scan_black_rows_from_top(frame: &RgbFrame) -> usize {
+    (0..frame.height)
+        .take_while(|row| row_black_ratio(frame, *row) >= 0.72)
+        .count()
+}
+
+fn scan_black_rows_from_bottom(frame: &RgbFrame) -> usize {
+    (0..frame.height)
+        .rev()
+        .take_while(|row| row_black_ratio(frame, *row) >= 0.72)
+        .count()
+}
+
+fn scan_black_columns_from_left(frame: &RgbFrame) -> usize {
+    (0..frame.width)
+        .take_while(|column| column_black_ratio(frame, *column) >= 0.72)
+        .count()
+}
+
+fn scan_black_columns_from_right(frame: &RgbFrame) -> usize {
+    (0..frame.width)
+        .rev()
+        .take_while(|column| column_black_ratio(frame, *column) >= 0.72)
+        .count()
+}
+
+fn row_black_ratio(frame: &RgbFrame, y: usize) -> f64 {
+    let black = (0..frame.width)
+        .filter(|x| is_near_black(frame, *x, y))
+        .count();
+    black as f64 / frame.width as f64
+}
+
+fn column_black_ratio(frame: &RgbFrame, x: usize) -> f64 {
+    let black = (0..frame.height)
+        .filter(|y| is_near_black(frame, x, *y))
+        .count();
+    black as f64 / frame.height as f64
+}
+
+fn is_near_black(frame: &RgbFrame, x: usize, y: usize) -> bool {
+    luminance_at(frame, x, y) <= 36.0
+}
+
+fn scale_crop_to_source(
+    crop: &CropSuggestion,
+    frame_width: u32,
+    frame_height: u32,
+    source_width: u32,
+    source_height: u32,
+) -> CropSuggestion {
+    let scale_x = source_width as f64 / frame_width.max(1) as f64;
+    let scale_y = source_height as f64 / frame_height.max(1) as f64;
+    CropSuggestion {
+        width: ((crop.width as f64 * scale_x).round() as u32).min(source_width),
+        height: ((crop.height as f64 * scale_y).round() as u32).min(source_height),
+        x: ((crop.x as f64 * scale_x).round() as u32).min(source_width),
+        y: ((crop.y as f64 * scale_y).round() as u32).min(source_height),
+    }
 }
 
 fn build_black_border_problem(
@@ -1071,6 +1273,56 @@ fn capture_rgb_frame(
     }))
 }
 
+fn capture_rgb_frame_without_padding(
+    file_path: &str,
+    timestamp: f64,
+    width: usize,
+    height: usize,
+) -> Result<Option<RgbFrame>, String> {
+    let ffmpeg = find_ffmpeg_binary()
+        .ok_or_else(|| "未找到 ffmpeg，无法执行黑边兜底抽帧。请安装 ffmpeg 或配置 sidecar。".to_string())?;
+    let output = Command::new(ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            &format!("{:.3}", timestamp.max(0.0)),
+            "-i",
+            file_path,
+            "-frames:v",
+            "1",
+            "-vf",
+            &format!("scale={width}:{height}"),
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "pipe:1",
+        ])
+        .output()
+        .map_err(|error| format!("执行 FFmpeg 黑边兜底抽帧失败：{error}"))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "FFmpeg 黑边兜底抽帧失败：{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let expected = width * height * 3;
+    if output.stdout.len() < expected {
+        return Ok(None);
+    }
+
+    Ok(Some(RgbFrame {
+        width,
+        height,
+        timestamp,
+        data: output.stdout[..expected].to_vec(),
+    }))
+}
+
 fn attach_problem_screenshots(problem: &mut Problem, file_path: &str, duration: f64, fps: Option<f64>) {
     let start_time = safe_frame_timestamp(problem.start_time, duration, fps);
     let end_time = safe_frame_timestamp(problem.end_time, duration, fps);
@@ -1555,6 +1807,58 @@ mod tests {
     }
 
     #[test]
+    fn edge_black_border_detector_tolerates_small_bright_pixels() {
+        let mut frame = synthetic_letterboxed_frame(180, 320, 24, 18);
+        paint_mark(&mut frame.data, frame.width, 20, 4, 18, 10);
+        paint_mark(&mut frame.data, frame.width, 130, 300, 18, 10);
+
+        let crop = crop_from_edge_black_borders(&frame).unwrap();
+
+        assert_eq!(crop.y, 24);
+        assert_eq!(crop.height, 278);
+    }
+
+    #[test]
+    fn full_frame_cropdetect_result_is_not_visible_border() {
+        let crop = CropSuggestion {
+            width: 1080,
+            height: 1920,
+            x: 0,
+            y: 0,
+        };
+
+        assert!(!crop_has_visible_border(1080, 1920, &crop));
+    }
+
+    #[test]
+    fn black_border_frame_size_preserves_source_aspect_ratio() {
+        assert_eq!(black_border_frame_size(1080, 1920), (270, 480));
+        assert_eq!(black_border_frame_size(1920, 1080), (480, 270));
+    }
+
+    #[test]
+    fn desktop_32_sample_detects_black_border_when_available() {
+        let path = PathBuf::from("/Users/bey/Desktop/32.mp4");
+        if !path.exists() {
+            return;
+        }
+
+        let result = build_detection_result(
+            path.to_str().unwrap(),
+            &DetectionMode::Balanced,
+            &DetectionSettings::default(),
+        )
+        .unwrap();
+
+        let problem = result
+            .problems
+            .iter()
+            .find(|problem| problem.r#type == "黑边")
+            .expect("32.mp4 should report black border");
+        assert!(problem.description.contains("边缘黑像素占比兜底检测命中"));
+    }
+
+    #[test]
     fn parses_freezedetect_segments() {
         let log = "[freezedetect @ 0x1] lavfi.freezedetect.freeze_start: 2.400000\n\
 [freezedetect @ 0x1] lavfi.freezedetect.freeze_duration: 2.600000\n\
@@ -1917,6 +2221,25 @@ mod tests {
         let height = 90;
         let mut data = vec![32_u8; width * height * 3];
         paint_mark(&mut data, width, x0, y0, 24, 16);
+
+        RgbFrame {
+            width,
+            height,
+            timestamp: 1.0,
+            data,
+        }
+    }
+
+    fn synthetic_letterboxed_frame(width: usize, height: usize, top: usize, bottom: usize) -> RgbFrame {
+        let mut data = vec![12_u8; width * height * 3];
+        for y in top..height.saturating_sub(bottom) {
+            for x in 0..width {
+                let index = (y * width + x) * 3;
+                data[index] = 126;
+                data[index + 1] = 118;
+                data[index + 2] = 104;
+            }
+        }
 
         RgbFrame {
             width,
