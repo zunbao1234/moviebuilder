@@ -598,7 +598,7 @@ fn analyze_ai_logo_frames(frames: &[RgbFrame], settings: &DetectionSettings) -> 
             let mut end_time = None;
 
             for frame in frames {
-                let score = corner_mark_score(frame, corner);
+                let score = corner_mark_score(frame, corner, settings);
                 max_score = max_score.max(score);
                 if score >= settings.ai_logo_score_threshold {
                     hits += 1;
@@ -619,15 +619,17 @@ fn analyze_ai_logo_frames(frames: &[RgbFrame], settings: &DetectionSettings) -> 
         .collect()
 }
 
-fn corner_mark_score(frame: &RgbFrame, corner: Corner) -> f64 {
+fn corner_mark_score(frame: &RgbFrame, corner: Corner, settings: &DetectionSettings) -> f64 {
     if frame.width == 0 || frame.height == 0 || frame.data.len() < frame.width * frame.height * 3 {
         return 0.0;
     }
 
-    let corner_width = (frame.width / 4).max(24).min(frame.width);
-    let corner_height = (frame.height / 4).max(24).min(frame.height);
-    let margin_x = (frame.width / 40).max(2).min(frame.width.saturating_sub(1));
-    let margin_y = (frame.height / 40).max(2).min(frame.height.saturating_sub(1));
+    let corner_width = ratio_to_pixels(settings.ai_logo_corner_width_ratio, frame.width, 24);
+    let corner_height = ratio_to_pixels(settings.ai_logo_corner_height_ratio, frame.height, 24);
+    let margin_x = ratio_to_pixels(settings.ai_logo_corner_margin_ratio, frame.width, 2)
+        .min(frame.width.saturating_sub(1));
+    let margin_y = ratio_to_pixels(settings.ai_logo_corner_margin_ratio, frame.height, 2)
+        .min(frame.height.saturating_sub(1));
 
     let (x0, y0) = match corner {
         Corner::TopLeft => (margin_x, margin_y),
@@ -666,6 +668,12 @@ fn corner_mark_score(frame: &RgbFrame, corner: Corner) -> f64 {
     let high_ratio = high_contrast as f64 / total as f64;
     let texture_ratio = textured as f64 / total as f64;
     (high_ratio * 0.75 + texture_ratio * 0.25).min(1.0)
+}
+
+fn ratio_to_pixels(ratio: f64, full_size: usize, min_pixels: usize) -> usize {
+    ((full_size as f64 * ratio.clamp(0.01, 0.80)).round() as usize)
+        .max(min_pixels)
+        .min(full_size)
 }
 
 fn luminance_at(frame: &RgbFrame, x: usize, y: usize) -> f64 {
@@ -1253,11 +1261,29 @@ mod tests {
     fn ai_logo_corner_score_detects_high_contrast_mark() {
         let frame = synthetic_corner_mark_frame(Corner::TopRight, true);
 
-        let score = corner_mark_score(&frame, Corner::TopRight);
-        let opposite = corner_mark_score(&frame, Corner::BottomLeft);
+        let score = corner_mark_score(&frame, Corner::TopRight, &DetectionSettings::default());
+        let opposite = corner_mark_score(&frame, Corner::BottomLeft, &DetectionSettings::default());
 
         assert!(score >= 0.12, "score was {score}");
         assert!(opposite < 0.02, "opposite score was {opposite}");
+    }
+
+    #[test]
+    fn ai_logo_corner_area_settings_control_scan_position() {
+        let inside = synthetic_corner_mark_at(122, 10);
+        let outside = synthetic_corner_mark_at(86, 10);
+        let settings = DetectionSettings {
+            ai_logo_corner_margin_ratio: 0.05,
+            ai_logo_corner_width_ratio: 0.18,
+            ai_logo_corner_height_ratio: 0.25,
+            ..DetectionSettings::default()
+        };
+
+        let inside_score = corner_mark_score(&inside, Corner::TopRight, &settings);
+        let outside_score = corner_mark_score(&outside, Corner::TopRight, &settings);
+
+        assert!(inside_score >= 0.12, "inside score was {inside_score}");
+        assert!(outside_score < 0.05, "outside score was {outside_score}");
     }
 
     #[test]
@@ -1348,16 +1374,7 @@ mod tests {
                 Corner::BottomLeft => (10, height - 28),
                 Corner::BottomRight => (width - 42, height - 28),
             };
-
-            for y in y0..(y0 + 18) {
-                for x in x0..(x0 + 30) {
-                    let index = (y * width + x) * 3;
-                    let value = if (x + y) % 4 < 2 { 245 } else { 20 };
-                    data[index] = value;
-                    data[index + 1] = value;
-                    data[index + 2] = value;
-                }
-            }
+            paint_mark(&mut data, width, x0, y0, 30, 18);
         }
 
         RgbFrame {
@@ -1365,6 +1382,32 @@ mod tests {
             height,
             timestamp: 1.0,
             data,
+        }
+    }
+
+    fn synthetic_corner_mark_at(x0: usize, y0: usize) -> RgbFrame {
+        let width = 160;
+        let height = 90;
+        let mut data = vec![32_u8; width * height * 3];
+        paint_mark(&mut data, width, x0, y0, 24, 16);
+
+        RgbFrame {
+            width,
+            height,
+            timestamp: 1.0,
+            data,
+        }
+    }
+
+    fn paint_mark(data: &mut [u8], width: usize, x0: usize, y0: usize, mark_width: usize, mark_height: usize) {
+        for y in y0..(y0 + mark_height) {
+            for x in x0..(x0 + mark_width) {
+                let index = (y * width + x) * 3;
+                let value = if (x + y) % 4 < 2 { 245 } else { 20 };
+                data[index] = value;
+                data[index + 1] = value;
+                data[index + 2] = value;
+            }
         }
     }
 }

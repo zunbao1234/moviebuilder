@@ -103,6 +103,42 @@ export default function Toolbar({
             })
           }
         />
+        <ThresholdInput
+          label="AI边距"
+          value={settings.aiLogoCornerMarginRatio}
+          min={0.0}
+          max={0.2}
+          onChange={(value) =>
+            onSettingsChange({
+              ...settings,
+              aiLogoCornerMarginRatio: value,
+            })
+          }
+        />
+        <ThresholdInput
+          label="AI宽"
+          value={settings.aiLogoCornerWidthRatio}
+          min={0.05}
+          max={0.5}
+          onChange={(value) =>
+            onSettingsChange({
+              ...settings,
+              aiLogoCornerWidthRatio: value,
+            })
+          }
+        />
+        <ThresholdInput
+          label="AI高"
+          value={settings.aiLogoCornerHeightRatio}
+          min={0.05}
+          max={0.5}
+          onChange={(value) =>
+            onSettingsChange({
+              ...settings,
+              aiLogoCornerHeightRatio: value,
+            })
+          }
+        />
         <ToolbarButton icon={<Upload size={16} />} label="导入文件" onClick={onImportFiles} />
         <ToolbarButton icon={<FolderOpen size={16} />} label="导入文件夹" onClick={onImportFolder} />
         <ToolbarButton

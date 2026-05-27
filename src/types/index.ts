@@ -10,6 +10,9 @@ export interface DetectionSettings {
   blackBorderIrregularThreshold: number;
   aiLogoScoreThreshold: number;
   aiLogoMinHits: number;
+  aiLogoCornerMarginRatio: number;
+  aiLogoCornerWidthRatio: number;
+  aiLogoCornerHeightRatio: number;
 }
 
 export interface VideoFile {

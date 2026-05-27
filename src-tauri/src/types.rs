@@ -35,6 +35,9 @@ pub struct DetectionSettings {
     pub black_border_irregular_threshold: f64,
     pub ai_logo_score_threshold: f64,
     pub ai_logo_min_hits: usize,
+    pub ai_logo_corner_margin_ratio: f64,
+    pub ai_logo_corner_width_ratio: f64,
+    pub ai_logo_corner_height_ratio: f64,
 }
 
 impl Default for DetectionSettings {
@@ -45,6 +48,9 @@ impl Default for DetectionSettings {
             black_border_irregular_threshold: 0.03,
             ai_logo_score_threshold: 0.12,
             ai_logo_min_hits: 2,
+            ai_logo_corner_margin_ratio: 0.025,
+            ai_logo_corner_width_ratio: 0.25,
+            ai_logo_corner_height_ratio: 0.25,
         }
     }
 }
