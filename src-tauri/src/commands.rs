@@ -484,6 +484,11 @@ fn build_black_border_problem(
         RiskLevel::Green
     };
     let position = describe_border_position(left, right, top, bottom);
+    let ratio_summary = format!(
+        "左右最大占比 {:.1}%，上下最大占比 {:.1}%",
+        max_horizontal_ratio * 100.0,
+        max_vertical_ratio * 100.0
+    );
     let risk_text = match level {
         RiskLevel::Red => "达到红线阈值",
         RiskLevel::Yellow => "达到黄线阈值",
@@ -497,7 +502,7 @@ fn build_black_border_problem(
         start_time: 0.0,
         end_time: duration.max(0.0),
         description: format!(
-            "FFmpeg cropdetect 实测：{position}；裁剪建议 crop={}:{}:{}:{}；最大黑边占比 {:.1}%，{risk_text}。",
+            "FFmpeg cropdetect 实测：{position}；{ratio_summary}；裁剪建议 crop={}:{}:{}:{}；最大黑边占比 {:.1}%，{risk_text}。",
             crop.width,
             crop.height,
             crop.x,
@@ -1457,6 +1462,48 @@ mod tests {
         assert!(matches!(yellow.level, RiskLevel::Yellow));
         assert!(matches!(red.level, RiskLevel::Red));
         assert!(matches!(green.level, RiskLevel::Green));
+    }
+
+    #[test]
+    fn vertical_black_borders_are_included_in_risk_level() {
+        let problem = build_black_border_problem(
+            1920,
+            1080,
+            &CropSuggestion {
+                width: 1920,
+                height: 840,
+                x: 0,
+                y: 120,
+            },
+            30.0,
+            &DetectionSettings::default(),
+        )
+        .unwrap();
+
+        assert!(matches!(problem.level, RiskLevel::Red));
+        assert!(problem.description.contains("上下黑边 120px/120px"));
+        assert!(problem.description.contains("上下最大占比 11.1%"));
+    }
+
+    #[test]
+    fn horizontal_black_borders_are_included_in_risk_level() {
+        let problem = build_black_border_problem(
+            1920,
+            1080,
+            &CropSuggestion {
+                width: 1600,
+                height: 1080,
+                x: 160,
+                y: 0,
+            },
+            30.0,
+            &DetectionSettings::default(),
+        )
+        .unwrap();
+
+        assert!(matches!(problem.level, RiskLevel::Yellow));
+        assert!(problem.description.contains("左右黑边 160px/160px"));
+        assert!(problem.description.contains("左右最大占比 8.3%"));
     }
 
     #[test]

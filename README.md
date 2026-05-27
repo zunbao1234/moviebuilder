@@ -6,7 +6,7 @@
 
 - 日期：2026-05-27
 - 阶段：MVP 初始化
-- 状态：已完成基础工程、前端主界面、Tauri IPC、检测任务流、报告骨架、浏览器静态渲染验证，补齐 Tauri 默认图标，修复文件导入权限配置，为每个问题补齐开始/结束截图展示，接入 FFmpeg/ffprobe 真实基础信息读取、cropdetect 黑边检测、freezedetect 冻结帧检测、四角疑似 AI 标识检测和字幕 OCR/小说文本逐字匹配，新增黑边阈值与 AI 四角扫描位置设置，并完成本机 FFmpeg/ffprobe 命令验证。
+- 状态：已完成基础工程、前端主界面、Tauri IPC、检测任务流、报告骨架、浏览器静态渲染验证，补齐 Tauri 默认图标，修复文件导入权限配置，为每个问题补齐开始/结束截图展示，接入 FFmpeg/ffprobe 真实基础信息读取、cropdetect 黑边检测、freezedetect 冻结帧检测、四角疑似 AI 标识检测和字幕 OCR/小说文本逐字匹配，新增黑边阈值与 AI 四角扫描位置设置，补强上下/左右黑边风险说明，并完成本机 FFmpeg/ffprobe 命令验证。
 - 检测说明：当前版本不再固定生成 1 红 / 2 黄 / 1 绿模拟问题；已接入真实视频基础信息、真实黑边检测、真实冻结帧检测、四角疑似 AI 标识检测和字幕 OCR/小说文本逐字匹配。跳帧、音画同步、音频和编码合规性仍待后续实现。
 
 ## 技术栈
@@ -65,6 +65,7 @@ cargo check
 - [x] 安装用户级 `ffmpeg` 命令到 `/Users/bey/.local/bin/ffmpeg`，供本机开发验证使用
 - [x] 接入 `ffprobe` 读取真实视频时长、分辨率、帧率和编码信息
 - [x] 接入 FFmpeg `cropdetect` 执行真实黑边检测
+- [x] 黑边检测同时纳入上下和左右黑边，并在问题描述中输出对应像素和占比
 - [x] 未检测到真实问题时返回 0 红 / 0 黄 / 0 绿，不再生成固定模拟结果
 - [x] 黑边检测按 PRD 阈值分为红线、黄线、绿线
 - [x] 后端自动查找 `src-tauri/bin`、`~/.local/bin`、`/opt/homebrew/bin`、`/usr/local/bin` 中的 `ffmpeg`/`ffprobe`
@@ -86,7 +87,7 @@ cargo check
 - `npm run build`：通过；本轮已从模拟结果切换到真实基础信息和黑边检测。
 - 浏览器静态渲染：通过，页面可显示工具栏、文件列表空态、结果面板空态和状态栏。
 - `cargo check`：通过；本轮已从模拟结果切换到真实基础信息和黑边检测。
-- `cargo test`：通过；23 个 Rust 单元测试覆盖 MP4 时长读取、无证据不生成 mock 问题、cropdetect 解析、黑边默认/自定义阈值、freezedetect 解析、冻结帧阈值、四角疑似 AI 标识启发式检测、AI 四角扫描区域设置、字幕 OCR 文本清洗、逐字匹配、重复 OCR 合并、字幕匹配错误处理和 base64 编码。
+- `cargo test`：通过；25 个 Rust 单元测试覆盖 MP4 时长读取、无证据不生成 mock 问题、cropdetect 解析、上下/左右黑边风险覆盖、黑边默认/自定义阈值、freezedetect 解析、冻结帧阈值、四角疑似 AI 标识启发式检测、AI 四角扫描区域设置、字幕 OCR 文本清洗、逐字匹配、重复 OCR 合并、字幕匹配错误处理和 base64 编码。
 - `tesseract --version`：未安装；字幕 OCR 功能代码与单元测试已完成，真实端到端 OCR 需安装 Tesseract 或补齐 sidecar 后验证。
 - `npm run tauri dev`：待用户本机重新运行；上一轮阻塞的默认图标、导入权限、截图不显示和模拟时间戳问题已修复。
 - 桌面验证视频 `/Users/bey/Desktop/a54adf926978ecca927a6b468caf2d49 2.mp4`：ffprobe 读到 17.647s、720x1280、30fps、H.264；freezedetect 读到 6.133s-8.833s 冻结帧，持续 2.7s，应归为黄线；cropdetect 最后建议为 `crop=700:1248:10:0`。
