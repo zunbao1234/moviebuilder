@@ -86,6 +86,13 @@ pub struct DetectionResult {
     pub report_path: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportExportItem {
+    pub file_path: String,
+    pub result: DetectionResult,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RiskLevel {

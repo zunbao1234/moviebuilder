@@ -2,7 +2,8 @@ use crate::{
     report::write_html_report,
     types::{
         AppState, BasicVideoInfo, DetectionCompletePayload, DetectionErrorPayload, DetectionMode,
-        DetectionProgressPayload, DetectionResult, DetectionSettings, Problem, RiskLevel,
+        DetectionProgressPayload, DetectionResult, DetectionSettings, Problem, ReportExportItem,
+        RiskLevel,
     },
 };
 use serde_json::Value;
@@ -103,6 +104,18 @@ pub fn generate_html_report(
         )?,
     };
     write_html_report(&file_path, &result)
+}
+
+#[tauri::command]
+pub fn generate_batch_html_reports(items: Vec<ReportExportItem>) -> Result<Vec<String>, String> {
+    if items.is_empty() {
+        return Err("没有可导出的检测结果。请先完成至少一个视频检测。".to_string());
+    }
+
+    items
+        .into_iter()
+        .map(|item| write_html_report(&item.file_path, &item.result))
+        .collect()
 }
 
 #[tauri::command]
@@ -2427,6 +2440,68 @@ mod tests {
         assert!(html.contains("来自前端当前结果"));
         let _ = fs::remove_file(path);
         let _ = fs::remove_file(report_path);
+    }
+
+    #[test]
+    fn batch_report_export_writes_all_supplied_results() {
+        let path_a = std::env::temp_dir().join("video_inspector_batch_report_a.mp4");
+        let path_b = std::env::temp_dir().join("video_inspector_batch_report_b.mp4");
+        write_minimal_mp4_with_duration(&path_a, 10, 1_000);
+        write_minimal_mp4_with_duration(&path_b, 12, 1_000);
+
+        let report_paths = generate_batch_html_reports(vec![
+            ReportExportItem {
+                file_path: path_a.to_string_lossy().to_string(),
+                result: test_detection_result("批量导出 A"),
+            },
+            ReportExportItem {
+                file_path: path_b.to_string_lossy().to_string(),
+                result: test_detection_result("批量导出 B"),
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(report_paths.len(), 2);
+        let html_a = fs::read_to_string(&report_paths[0]).unwrap();
+        let html_b = fs::read_to_string(&report_paths[1]).unwrap();
+        assert!(html_a.contains("批量导出 A"));
+        assert!(html_b.contains("批量导出 B"));
+
+        let _ = fs::remove_file(path_a);
+        let _ = fs::remove_file(path_b);
+        report_paths.into_iter().for_each(|path| {
+            let _ = fs::remove_file(path);
+        });
+    }
+
+    #[test]
+    fn batch_report_export_rejects_empty_items() {
+        let error = generate_batch_html_reports(Vec::new()).unwrap_err();
+
+        assert!(error.contains("没有可导出"));
+    }
+
+    fn test_detection_result(problem_type: &str) -> DetectionResult {
+        result_from_parts(
+            vec![Problem {
+                id: "batch-red-1".to_string(),
+                r#type: problem_type.to_string(),
+                level: RiskLevel::Red,
+                start_time: 1.0,
+                end_time: 2.0,
+                description: "批量导出复用前端当前结果。".to_string(),
+                screenshot: None,
+                start_screenshot: None,
+                end_screenshot: None,
+            }],
+            BasicVideoInfo {
+                duration: 10.0,
+                resolution: "1920x1080".to_string(),
+                fps: 30.0,
+                codec: "h264".to_string(),
+                file_size: 1.0,
+            },
+        )
     }
 
     fn write_minimal_mp4_with_duration(path: &Path, seconds: u32, timescale: u32) {

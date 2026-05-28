@@ -26,6 +26,8 @@ interface ToolbarProps {
   onClearList: () => void;
   canExportReport: boolean;
   onExportReport: () => void;
+  canExportBatchReports: boolean;
+  onExportBatchReports: () => void;
 }
 
 const modes: Array<{ value: DetectionMode; label: string }> = [
@@ -49,6 +51,8 @@ export default function Toolbar({
   onClearList,
   canExportReport,
   onExportReport,
+  canExportBatchReports,
+  onExportBatchReports,
 }: ToolbarProps) {
   return (
     <header className="flex min-h-16 flex-wrap items-center justify-between gap-3 border-b border-slate-700/80 bg-slate-950/95 px-4 py-3">
@@ -164,9 +168,15 @@ export default function Toolbar({
         />
         <ToolbarButton
           icon={<FileDown size={16} />}
-          label="导出报告"
+          label="导出当前"
           onClick={onExportReport}
           disabled={!canExportReport || isDetecting}
+        />
+        <ToolbarButton
+          icon={<FileDown size={16} />}
+          label="批量导出"
+          onClick={onExportBatchReports}
+          disabled={!canExportBatchReports || isDetecting}
         />
         <ToolbarButton
           icon={<Trash2 size={16} />}

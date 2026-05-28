@@ -71,3 +71,8 @@ export interface DetectionErrorPayload {
   filePath: string;
   message: string;
 }
+
+export interface ReportExportItem {
+  filePath: string;
+  result: DetectionResult;
+}

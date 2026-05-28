@@ -15,6 +15,7 @@ import type {
   DetectionMode,
   DetectionSettings,
   DetectionProgressPayload,
+  ReportExportItem,
   VideoFile,
 } from "./types";
 import { dedupeFiles, isMp4Path } from "./utils";
@@ -44,6 +45,11 @@ export default function App() {
   const selectedFile = useMemo(
     () => files.find((file) => file.path === selectedPath) ?? files[0] ?? null,
     [files, selectedPath],
+  );
+
+  const exportableFiles = useMemo(
+    () => files.filter((file) => Boolean(file.result)),
+    [files],
   );
 
   const totalProgress = useMemo(() => {
@@ -294,6 +300,38 @@ export default function App() {
     }
   }
 
+  async function handleExportBatchReports() {
+    const items: ReportExportItem[] = exportableFiles
+      .filter((file): file is VideoFile & { result: NonNullable<VideoFile["result"]> } => Boolean(file.result))
+      .map((file) => ({
+        filePath: file.path,
+        result: file.result,
+      }));
+
+    if (items.length === 0) {
+      setActiveStage("请先完成至少一个文件检测后再批量导出报告");
+      return;
+    }
+    if (!isTauriRuntime()) {
+      console.info("批量导出需要在 Tauri 桌面运行时中使用。");
+      setActiveStage("批量导出需要 Tauri 运行时");
+      return;
+    }
+
+    try {
+      setActiveStage(`正在批量导出 ${items.length} 个报告`);
+      const reportPaths = await invoke<string[]>("generate_batch_html_reports", {
+        items,
+      });
+      setLastReportPath(reportPaths[reportPaths.length - 1] ?? null);
+      setActiveStage(`已批量导出 ${reportPaths.length} 个报告`);
+    } catch (error) {
+      const message = `批量导出失败：${String(error)}`;
+      setActiveStage(message);
+      console.error(error);
+    }
+  }
+
   return (
     <div className="relative flex h-screen min-w-[960px] flex-col overflow-hidden bg-slate-950 text-slate-100">
       <Toolbar
@@ -311,6 +349,8 @@ export default function App() {
         onClearList={handleClearList}
         canExportReport={Boolean(selectedFile?.result)}
         onExportReport={handleExportReport}
+        canExportBatchReports={exportableFiles.length > 0}
+        onExportBatchReports={handleExportBatchReports}
       />
 
       <main className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto bg-[radial-gradient(circle_at_20%_0%,rgba(59,130,246,0.14),transparent_34%),#0f172a] p-4">

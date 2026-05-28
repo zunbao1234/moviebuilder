@@ -2,7 +2,10 @@ mod commands;
 mod report;
 mod types;
 
-use commands::{cancel_detection, generate_html_report, inspect_file, pause_detection, read_folder_mp4, start_detection};
+use commands::{
+    cancel_detection, generate_batch_html_reports, generate_html_report, inspect_file,
+    pause_detection, read_folder_mp4, start_detection,
+};
 use tauri::Manager;
 use types::AppState;
 
@@ -16,6 +19,7 @@ pub fn run() {
             pause_detection,
             cancel_detection,
             generate_html_report,
+            generate_batch_html_reports,
             inspect_file
         ])
         .setup(|app| {
