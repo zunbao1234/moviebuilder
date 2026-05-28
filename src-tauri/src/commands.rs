@@ -223,8 +223,7 @@ fn build_detection_result(
     let mut problems = Vec::new();
 
     if let (Some(source_width), Some(source_height)) = (probe.width, probe.height) {
-        let cropdetect_problem = detect_black_borders(file_path, mode)?
-            .filter(|crop| crop_has_visible_border(source_width, source_height, crop))
+        let cropdetect_problem = detect_black_borders(file_path, duration, mode, source_width, source_height)?
             .and_then(|crop| {
                 build_black_border_problem(source_width, source_height, &crop, duration, settings)
             });
@@ -461,42 +460,66 @@ fn probe_video_with_ffprobe(ffprobe: &Path, file_path: &str) -> Result<VideoProb
 
 fn detect_black_borders(
     file_path: &str,
+    duration: f64,
     mode: &DetectionMode,
+    source_width: u32,
+    source_height: u32,
 ) -> Result<Option<CropSuggestion>, String> {
     let ffmpeg = find_ffmpeg_binary().ok_or_else(|| {
         "未找到 ffmpeg，无法执行黑边检测。请安装 ffmpeg 或配置 sidecar。".to_string()
     })?;
-    let sample_seconds = match mode {
-        DetectionMode::Fast => "8",
-        DetectionMode::Balanced => "15",
-        DetectionMode::Accurate => "30",
-    };
-    let output = Command::new(ffmpeg)
-        .args([
-            "-hide_banner",
-            "-i",
-            file_path,
-            "-t",
-            sample_seconds,
-            "-vf",
-            "cropdetect=limit=24:round=2:reset=0",
-            "-an",
-            "-f",
-            "null",
-            "-",
-        ])
-        .output()
-        .map_err(|error| format!("执行 FFmpeg 黑边检测失败：{error}"))?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "FFmpeg 黑边检测失败：{}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+    let sample_times = black_border_sample_times(duration, mode);
+    if sample_times.is_empty() {
+        return Ok(None);
     }
 
-    let log = String::from_utf8_lossy(&output.stderr);
-    Ok(parse_last_crop_suggestion(&log))
+    let mut samples = Vec::new();
+    for timestamp in sample_times {
+        let output = Command::new(&ffmpeg)
+            .args([
+                "-hide_banner",
+                "-ss",
+                &format!("{:.3}", timestamp.max(0.0)),
+                "-i",
+                file_path,
+                "-t",
+                "0.25",
+                "-vf",
+                "cropdetect=limit=24:round=2:reset=0",
+                "-an",
+                "-f",
+                "null",
+                "-",
+            ])
+            .output()
+            .map_err(|error| format!("执行 FFmpeg 黑边检测失败：{error}"))?;
+
+        if !output.status.success() {
+            return Err(format!(
+                "FFmpeg 黑边检测失败：{}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+
+        let log = String::from_utf8_lossy(&output.stderr);
+        samples.push(
+            parse_crop_suggestions(&log)
+                .into_iter()
+                .last()
+                .unwrap_or(CropSuggestion {
+                    width: source_width,
+                    height: source_height,
+                    x: 0,
+                    y: 0,
+                }),
+        );
+    }
+
+    Ok(stable_black_border_crop(
+        source_width,
+        source_height,
+        &samples,
+    ))
 }
 
 fn crop_has_visible_border(source_width: u32, source_height: u32, crop: &CropSuggestion) -> bool {
@@ -523,33 +546,33 @@ fn detect_edge_black_borders(
 ) -> Result<Option<CropSuggestion>, String> {
     let sample_times = black_border_sample_times(duration, mode);
     let (frame_width, frame_height) = black_border_frame_size(source_width, source_height);
-    let mut best = None;
-    let mut best_score = 0_u32;
+    let mut samples = Vec::new();
 
     for timestamp in sample_times {
         if let Some(frame) =
             capture_rgb_frame_without_padding(file_path, timestamp, frame_width, frame_height)?
         {
-            if let Some(crop) = crop_from_edge_black_borders(&frame) {
-                let border_score = crop.x
-                    + crop.y
-                    + (frame.width as u32).saturating_sub(crop.x + crop.width)
-                    + (frame.height as u32).saturating_sub(crop.y + crop.height);
-                if border_score > best_score {
-                    best_score = border_score;
-                    best = Some(scale_crop_to_source(
-                        &crop,
-                        frame.width as u32,
-                        frame.height as u32,
-                        source_width,
-                        source_height,
-                    ));
-                }
-            }
+            let crop = crop_from_edge_black_borders(&frame).unwrap_or(CropSuggestion {
+                width: frame.width as u32,
+                height: frame.height as u32,
+                x: 0,
+                y: 0,
+            });
+            samples.push(scale_crop_to_source(
+                &crop,
+                frame.width as u32,
+                frame.height as u32,
+                source_width,
+                source_height,
+            ));
         }
     }
 
-    Ok(best)
+    Ok(stable_black_border_crop(
+        source_width,
+        source_height,
+        &samples,
+    ))
 }
 
 fn black_border_frame_size(source_width: u32, source_height: u32) -> (usize, usize) {
@@ -1589,8 +1612,8 @@ fn parse_rate(value: &str) -> Option<f64> {
     value.parse::<f64>().ok()
 }
 
-fn parse_last_crop_suggestion(log: &str) -> Option<CropSuggestion> {
-    log.lines().filter_map(parse_crop_suggestion).last()
+fn parse_crop_suggestions(log: &str) -> Vec<CropSuggestion> {
+    log.lines().filter_map(parse_crop_suggestion).collect()
 }
 
 fn parse_crop_suggestion(line: &str) -> Option<CropSuggestion> {
@@ -1605,6 +1628,60 @@ fn parse_crop_suggestion(line: &str) -> Option<CropSuggestion> {
         x: parts.next()?.parse().ok()?,
         y: parts.next()?.parse().ok()?,
     })
+}
+
+fn stable_black_border_crop(
+    source_width: u32,
+    source_height: u32,
+    samples: &[CropSuggestion],
+) -> Option<CropSuggestion> {
+    let visible = samples
+        .iter()
+        .filter(|crop| crop_has_visible_border(source_width, source_height, crop))
+        .collect::<Vec<_>>();
+    if visible.is_empty() {
+        return None;
+    }
+
+    let required_hits = ((samples.len().max(1) as f64) * 0.60).ceil() as usize;
+    if visible.len() < required_hits.max(2) {
+        return None;
+    }
+
+    let left = median_u32(visible.iter().map(|crop| crop.x));
+    let top = median_u32(visible.iter().map(|crop| crop.y));
+    let right = median_u32(
+        visible
+            .iter()
+            .map(|crop| source_width.saturating_sub(crop.width + crop.x)),
+    );
+    let bottom = median_u32(
+        visible
+            .iter()
+            .map(|crop| source_height.saturating_sub(crop.height + crop.y)),
+    );
+    let width = source_width.saturating_sub(left + right);
+    let height = source_height.saturating_sub(top + bottom);
+
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    Some(CropSuggestion {
+        width,
+        height,
+        x: left,
+        y: top,
+    })
+}
+
+fn median_u32(values: impl Iterator<Item = u32>) -> u32 {
+    let mut values = values.collect::<Vec<_>>();
+    if values.is_empty() {
+        return 0;
+    }
+    values.sort_unstable();
+    values[values.len() / 2]
 }
 
 fn parse_freeze_segments(log: &str) -> Vec<FreezeSegment> {
@@ -1823,13 +1900,14 @@ mod tests {
     }
 
     #[test]
-    fn parses_last_cropdetect_suggestion() {
+    fn parses_cropdetect_suggestions() {
         let log = "[Parsed_cropdetect_0 @ 0x1] crop=1920:800:0:140\n[Parsed_cropdetect_0 @ 0x1] crop=1916:800:2:140";
 
-        let crop = parse_last_crop_suggestion(log).unwrap();
+        let crops = parse_crop_suggestions(log);
 
+        assert_eq!(crops.len(), 2);
         assert_eq!(
-            crop,
+            crops[1],
             CropSuggestion {
                 width: 1916,
                 height: 800,
@@ -2000,6 +2078,87 @@ mod tests {
     fn black_border_frame_size_preserves_source_aspect_ratio() {
         assert_eq!(black_border_frame_size(1080, 1920), (270, 480));
         assert_eq!(black_border_frame_size(1920, 1080), (480, 270));
+    }
+
+    #[test]
+    fn black_border_aggregation_rejects_single_outlier_sample() {
+        let samples = vec![
+            CropSuggestion {
+                width: 1080,
+                height: 1600,
+                x: 0,
+                y: 160,
+            },
+            CropSuggestion {
+                width: 1080,
+                height: 1920,
+                x: 0,
+                y: 0,
+            },
+            CropSuggestion {
+                width: 1080,
+                height: 1920,
+                x: 0,
+                y: 0,
+            },
+            CropSuggestion {
+                width: 1080,
+                height: 1920,
+                x: 0,
+                y: 0,
+            },
+            CropSuggestion {
+                width: 1080,
+                height: 1920,
+                x: 0,
+                y: 0,
+            },
+        ];
+
+        assert!(stable_black_border_crop(1080, 1920, &samples).is_none());
+    }
+
+    #[test]
+    fn black_border_aggregation_keeps_majority_consistent_samples() {
+        let samples = vec![
+            CropSuggestion {
+                width: 1080,
+                height: 1600,
+                x: 0,
+                y: 160,
+            },
+            CropSuggestion {
+                width: 1080,
+                height: 1602,
+                x: 0,
+                y: 159,
+            },
+            CropSuggestion {
+                width: 1080,
+                height: 1604,
+                x: 0,
+                y: 158,
+            },
+            CropSuggestion {
+                width: 1080,
+                height: 1920,
+                x: 0,
+                y: 0,
+            },
+            CropSuggestion {
+                width: 1080,
+                height: 1600,
+                x: 0,
+                y: 160,
+            },
+        ];
+
+        let crop = stable_black_border_crop(1080, 1920, &samples).unwrap();
+
+        assert_eq!(crop.x, 0);
+        assert_eq!(crop.y, 160);
+        assert_eq!(crop.width, 1080);
+        assert_eq!(crop.height, 1600);
     }
 
     #[test]
